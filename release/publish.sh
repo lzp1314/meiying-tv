@@ -81,10 +81,11 @@ with open("release/update.json", "w", encoding="utf-8") as f:
 print("update.json 已更新: vc%s / %s" % (code, name))
 PY
 
-# 5. 提交并双推
+# 5. 提交并双推（GitHub 默认分支是 main，master 也要同步，避免主页显示空仓库）
 git add release/update.json
 git commit -m "发布魅影TV ${TAG}" || echo "无改动可提交"
 git push origin main:master
+git push github main
 git push github main:master
 
 # 6. 端到端验证：线上 update.json -> 匿名下载 -> MD5 比对
