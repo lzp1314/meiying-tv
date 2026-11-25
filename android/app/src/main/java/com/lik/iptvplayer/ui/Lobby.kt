@@ -61,6 +61,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lik.iptvplayer.core.Channel
@@ -376,6 +377,13 @@ private fun ChannelPage(
     val chFocus = remember { FocusRequester() }
     val listState = rememberLazyListState()
 
+    // 右键从分类栏进节目列表时，焦点必须挂在一个真实存在的行上。
+    // 老逻辑只在 ch.id == currentId 时挂 chFocus；当正在播的台不在当前分类
+    // （或不属于当前源）时，没有任何行挂载，requestFocus 抛异常被吞，
+    // RailItem 又无条件消费右键 → 焦点卡在分类栏，怎么按都进不去列表。
+    // 修法：目标行优先当前台，不在 shown 里就退回第一行，保证永远有挂载点。
+    val focusTargetId = if (shown.any { it.id == currentId }) currentId else shown.firstOrNull()?.id
+
     // 第四点：呼出侧栏时列表先滚到「正在播放的频道」，光标一眼就落在当前台，
     // 不用从第一个频道往下翻。只在页首次出现 / 换台后对齐一次，不干扰手动滚动。
     LaunchedEffect(block?.source?.id, currentId) {
@@ -473,9 +481,8 @@ private fun ChannelPage(
                 }
                 LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     items(shown, key = { it.id }) { ch ->
-                        // 焦点给「正在播放的频道」；没有当前台时才退回第一个
-                        val isFocusTarget = ch.id == currentId ||
-                            (currentId == null && ch.id == shown.first().id)
+                        // 焦点目标：优先当前台，当前台不在本分类/本源就退回第一行
+                        val isFocusTarget = ch.id == focusTargetId
                         LobbyChannelRow(
                             number = order[ch.id] ?: 0,
                             channel = ch,
@@ -509,7 +516,7 @@ private fun RailItem(
     text: String,
     selected: Boolean,
     focusRequester: FocusRequester? = null,
-    onRight: () -> Unit,
+    onRight: () -> Boolean,
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -528,9 +535,10 @@ private fun RailItem(
             .onFocusChanged { focused = it.isFocused }
             .focusable()
             .onKeyEvent { e ->
-                // 右键进频道列表：不给显式关系时，LazyColumn 之间的焦点搜索偶尔会跳到别处
+                // 右键进频道列表：跳成功才消费；跳失败放行给 Compose 的焦点搜索兜底。
+                // 以前无条件返回 true，目标没挂载时就把事件吞了，焦点卡在分类栏。
                 if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionRight) {
-                    onRight(); true
+                    onRight()
                 } else {
                     false
                 }
@@ -567,7 +575,7 @@ private fun LobbyChannelRow(
     channel: Channel,
     playing: Boolean,
     modifier: Modifier,
-    onLeft: () -> Unit,
+    onLeft: () -> Boolean,
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -585,8 +593,9 @@ private fun LobbyChannelRow(
             .onFocusChanged { focused = it.isFocused }
             .focusable()
             .onKeyEvent { e ->
+                // 左键回分类栏：跳成功才消费，跳失败让 Compose 兜底
                 if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft) {
-                    onLeft(); true
+                    onLeft()
                 } else {
                     false
                 }
@@ -861,12 +870,16 @@ private fun SettingsPage(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item {
-            Column {
-                Text("设置", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.SemiBold)
-                Text(
-                    "现在：${current?.name ?: "未播放"}　·　源：${sources.firstOrNull { it.id == activeId }?.name ?: "无"}",
-                    color = TextDim, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp),
-                )
+            // 顶部锚点：LazyColumn 只会滚到「有焦点的 item」。标题原来是不可聚焦的
+            // 纯 Text，焦点落到下面的按钮后就再也回不到最上面（用户实机反馈）。
+            FocusableBlock {
+                Column {
+                    Text("设置", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "现在：${current?.name ?: "未播放"}　·　源：${sources.firstOrNull { it.id == activeId }?.name ?: "无"}",
+                        color = TextDim, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
             }
         }
         // 已添加的源：和信号源页一样可切换/锁定/编辑，一屏看全
@@ -909,22 +922,26 @@ private fun SettingsPage(
         if (decoder.isNotBlank()) {
             item {
                 val soft = decoder.startsWith("c2.android.") || decoder.startsWith("OMX.google.")
-                Text(
-                    "解码：$decoder（${if (soft) "软解，会掉帧" else "硬解"}）",
-                    color = if (soft) Color(0xFFF87171) else Color(0xFF4ADE80),
-                    fontSize = 12.sp,
-                )
+                FocusableBlock {
+                    Text(
+                        "解码：$decoder（${if (soft) "软解，会掉帧" else "硬解"}）",
+                        color = if (soft) Color(0xFFF87171) else Color(0xFF4ADE80),
+                        fontSize = 12.sp,
+                    )
+                }
             }
         }
         // 最近一次错误码常驻：下次卡住能直接看出是 ERROR_CODE_IO_* 还是解码器问题
         if (errorCode.isNotBlank()) {
             item {
                 val decoderIssue = errorCode.contains("DECODER", ignoreCase = true)
-                Text(
-                    "最近错误：$errorCode（${if (decoderIssue) "解码器" else "多为网络/源"}）",
-                    color = Color(0xFFFCA5A5),
-                    fontSize = 12.sp,
-                )
+                FocusableBlock {
+                    Text(
+                        "最近错误：$errorCode（${if (decoderIssue) "解码器" else "多为网络/源"}）",
+                        color = Color(0xFFFCA5A5),
+                        fontSize = 12.sp,
+                    )
+                }
             }
         }
         item {
@@ -947,17 +964,21 @@ private fun SettingsPage(
                 UpdateSection(isTv = true, url = updateUrl, onUrlChange = onUpdateUrl)
             }
         }
+        // 底部锚点：最后一项必须可聚焦，否则焦点停在「检查更新」按钮上，
+        // 下面的设备信息 / 版本 / 崩溃记录永远滚不进屏幕。
         item {
-            Column {
-                Text(deviceInfo, color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 4)
-                Text("版本 $versionName", color = Color(0xFF64748B), fontSize = 11.sp)
-                if (crashLog != null) {
-                    Text(
-                        "上次崩溃记录：" + crashLog.lineSequence().take(6).joinToString("\n"),
-                        color = Color(0xFFFCA5A5), fontSize = 10.sp, maxLines = 8,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 6.dp),
-                    )
+            FocusableBlock {
+                Column {
+                    Text(deviceInfo, color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 4)
+                    Text("版本 $versionName", color = Color(0xFF64748B), fontSize = 11.sp)
+                    if (crashLog != null) {
+                        Text(
+                            "上次崩溃记录：" + crashLog.lineSequence().take(6).joinToString("\n"),
+                            color = Color(0xFFFCA5A5), fontSize = 10.sp, maxLines = 8,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                    }
                 }
             }
         }
@@ -973,12 +994,35 @@ private fun LabeledRow(label: String, content: @Composable () -> Unit) {
 }
 
 /**
- * 把焦点请求包一层：节点可能还没挂载，直接 requestFocus 会抛异常。
- * 大厅里到处是「按右键跳到下一栏」，每次都得防一手。
+ * 给纯文字块一个可聚焦的壳，带细微高亮。
+ *
+ * LazyColumn 的滚动完全由焦点驱动：焦点落到哪个 item，它就滚到哪。
+ * 不可聚焦的 Text 永远拿不到焦点，于是列表顶部/底部这些纯文字区就滚不过去
+ * （实机反馈「按到顶也看不到最上面、看不到下面」）。包一层 focusable 后，
+ * 遥控器上下键能逐块走到，滚动自然到位。
+ *
+ * 只在 TV 侧栏正文里用——手机是触摸滚动，多几个焦点框反而是干扰。
  */
-private fun requestFocus(fr: FocusRequester) {
-    runCatching { fr.requestFocus() }
+@Composable
+private fun FocusableBlock(content: @Composable () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    Box(
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (focused) Color(0x332563EB) else Color.Transparent)
+            .onFocusChanged { focused = it.isFocused }
+            .focusable()
+            .padding(horizontal = 6.dp, vertical = 3.dp),
+    ) { content() }
 }
+
+/**
+ * 把焦点请求包一层：节点可能还没挂载，直接 requestFocus 会抛异常。
+ * 返回是否成功——调用方据此决定要不要消费按键：跳失败就放行给 Compose
+ * 自己的焦点搜索兜底，不能「吞了事件又没跳成」，那会让焦点彻底卡死。
+ */
+private fun requestFocus(fr: FocusRequester): Boolean =
+    runCatching { fr.requestFocus() }.isSuccess
 
 /** 系统里读到的版本名（不依赖 BuildConfig）。 */
 @Composable
