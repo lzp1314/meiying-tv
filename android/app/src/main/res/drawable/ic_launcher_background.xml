@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 魅影TV 自适应图标底色：深蓝紫渐变，与 launcher PNG 的底一致 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <gradient
+        android:type="linear"
+        android:angle="315"
+        android:startColor="#241E5B"
+        android:centerColor="#5B21B6"
+        android:endColor="#0F172A" />
+</shape>

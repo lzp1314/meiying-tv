@@ -1,0 +1,40 @@
+# 本机便携工具链（约 1 GB，不入库）
+.toolchain/
+
+# Gradle / Android 构建产物
+android/.gradle/
+android/.kotlin/
+android/.genicons/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/captures/
+*.apk
+*.ap_
+*.aab
+
+# 运行时数据：可能包含订阅地址与访问密码，绝不入库
+prototype/data/sources.json
+prototype/data/*.tmp
+
+# 本机日志与下载缓存
+*.log
+
+# 本地版文档：含本机路径、内网地址与操作命令，绝不对外
+README.local.md
+release/README-发布.md
+
+# 图标生成脚本：含本机绝对路径
+.tools/
+
+# 本机一键打包脚本：含硬编码 JDK/SDK 路径，对外可用 gradlew 通用命令
+android/build-apk.bat
+
+# 局域网分发工具：含本机端口与路径
+serve-apk.js
+apk-qrcode.png
+
+# APK 默认全排除，只放行当前发布版（OTA raw 直链需要它）
+*.apk
+!release/apk/iptv-player-0.4.7.apk

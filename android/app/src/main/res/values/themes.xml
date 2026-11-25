@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 两端都以黑底起步：进应用第一帧就是播放器的黑场，不闪白 -->
+    <style name="Theme.IPTVPlayer" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/black</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+    </style>
+
+    <!-- TV 用深色底，10 英尺观看对比度更高；不锁定 screenOrientation -->
+    <style name="Theme.IPTVPlayer.TV" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/black</item>
+    </style>
+</resources>

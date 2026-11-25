@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IPTV 空壳播放器 · 原型</title>
+<link rel="stylesheet" href="/app.css">
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <div class="mark">TV</div>
+      <div><h1>IPTV 空壳播放器 <span class="tagline">原型 · 数据层验证</span></h1>
+        <p id="subline">源列表为空，添加一个订阅地址开始</p></div>
+    </div>
+    <div class="top-actions">
+      <span class="conn"><span class="dot" id="connDot"></span><span id="connText">连接中</span></span>
+      <div class="seg" id="modeSeg">
+        <button class="active" data-mode="mobile">手机模式</button>
+        <button data-mode="tv">TV 模式</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="body">
+    <aside class="sidebar">
+      <div class="side-head"><h2>订阅源</h2><span class="count" id="srcCount">0</span></div>
+      <div class="side-actions">
+        <button class="btn btn-primary focusable" id="btnAdd">＋ 添加源</button>
+        <button class="btn focusable" id="btnScan">扫一扫</button>
+        <button class="btn focusable" id="btnPair">TV 配对</button>
+        <button class="btn btn-ghost focusable" id="btnDemo">载入演示源</button>
+      </div>
+      <div id="sourceList" class="source-list"></div>
+      <div class="side-foot">
+        <div>应用不内置任何频道或源地址</div>
+        <div>仅播放自行配置、有权使用的订阅</div>
+        <div id="dataFileHint">数据存本地 JSON</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <section class="panel diag">
+        <div class="panel-head"><h2>数据层诊断</h2><span class="hint" id="diagHint">尚未刷新任何源</span></div>
+        <div id="diagBody" class="diag-body"><div class="empty">添加源后点「刷新」，这里会显示 M3U 解析、EPG 自动发现与对表结果。</div></div>
+      </section>
+
+      <section class="panel channels">
+        <div class="panel-head"><h2>频道与节目单</h2><span class="hint" id="chHint">0 个频道</span></div>
+        <div id="channelArea" class="channel-area"><div class="empty">暂无频道</div></div>
+      </section>
+
+      <section class="panel player-panel">
+        <div class="panel-head"><h2>播放</h2>
+          <span class="hint" id="playerHint">空壳：仅做起播与错误提示，不做解码定制</span></div>
+        <div class="player-wrap">
+          <video id="video" controls playsinline></video>
+          <div class="player-info" id="playerInfo">点击频道即可尝试起播。</div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="addModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head"><h3 id="addTitle">添加订阅源</h3><button class="icon-btn" data-close="addModal">×</button></div>
+    <div class="modal-body">
+      <div class="field"><label>订阅地址 *</label>
+        <input type="url" id="inUrl" placeholder="http://NAS:9797/密码/playlist.m3u">
+        <div class="desc">填 hd-iptv 面板复制的 .m3u 地址。访问密码是路径中的一段，会原样保留。</div></div>
+      <div class="field"><label>名称</label><input type="text" id="inName" placeholder="家里 NAS"></div>
+      <div class="field"><label>节目单地址（可选）</label>
+        <input type="url" id="inEpg" placeholder="留空 = 自动从 M3U 头或同源推导">
+        <div class="desc">留空时优先读 M3U 的 x-tvg-url，否则推导同源 /epg.xml。</div></div>
+      <div class="scan-inline">
+        <button class="btn focusable" id="btnInlineScan">用摄像头扫描二维码</button>
+        <span id="scanInlineHint"></span>
+      </div>
+    </div>
+    <div class="modal-foot"><span class="modal-tip">写入本地 data/sources.json</span>
+      <button class="btn" data-close="addModal">取消</button>
+      <button class="btn btn-primary" id="btnSaveSource">保存</button></div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="scanModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head"><h3>扫码添加订阅源</h3><button class="icon-btn" data-close="scanModal">×</button></div>
+    <div class="modal-body">
+      <video id="scanVideo" playsinline muted></video>
+      <div class="scan-status" id="scanStatus">准备启动摄像头…</div>
+      <div class="field"><label>或手动粘贴扫描结果</label>
+        <input type="url" id="scanManual" placeholder="扫描失败时可直接粘贴 URL"></div>
+    </div>
+    <div class="modal-foot"><span class="modal-tip">需 localhost 或 HTTPS 才能调用摄像头</span>
+      <button class="btn" id="btnScanStop">关闭摄像头</button>
+      <button class="btn btn-primary" id="btnScanUse">使用该地址</button></div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="pairModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head"><h3>TV 配对 · 由手机推送订阅源</h3><button class="icon-btn" data-close="pairModal">×</button></div>
+    <div class="modal-body pair-body">
+      <div class="qr-box" id="qrBox"><div class="empty">正在生成二维码…</div></div>
+      <div class="pair-info">
+        <div class="pair-code" id="pairCode">------</div>
+        <div class="desc">手机扫描二维码，或输入 6 位配对码。TV 没有摄像头，方向是「TV 显示 → 手机扫」。</div>
+        <div class="pair-url mono" id="pairUrl">—</div>
+        <div class="pair-state" id="pairState">等待手机推送…</div>
+        <div class="desc" id="pairScope"></div>
+      </div>
+    </div>
+    <div class="modal-foot"><span class="modal-tip">配对码一次性有效</span>
+      <button class="btn" data-close="pairModal">关闭</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="/lib/parse.js"></script>
+<script src="/lib/demo.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

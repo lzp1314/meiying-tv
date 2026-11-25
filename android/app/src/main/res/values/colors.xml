@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#FFF4F6FA</color>
+    <color name="tv_bg">#FF0F172A</color>
+    <color name="brand">#FF2563EB</color>
+    <!-- 自适应图标底色；与位图图标的渐变中段接近，两套图标视觉一致 -->
+    <color name="ic_launcher_bg">#FF101F38</color>
+</resources>

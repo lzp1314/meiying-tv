@@ -1,0 +1,992 @@
+package com.lik.iptvplayer.ui
+
+import android.graphics.Bitmap
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Button
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.lik.iptvplayer.core.Channel
+import com.lik.iptvplayer.core.DecodeMode
+import com.lik.iptvplayer.core.Diag
+import com.lik.iptvplayer.core.LogoLoader
+import com.lik.iptvplayer.core.PairInfo
+import com.lik.iptvplayer.core.QrEncoder
+import com.lik.iptvplayer.core.Source
+import kotlinx.coroutines.delay
+
+/** 大厅左侧的一级导航。按用户给的参考图，只保留这三项。 */
+internal enum class LobbyTab(val label: String) {
+    Channels("频道"),
+    Sources("信号源"),
+    Settings("设置"),
+}
+
+// 参考图里的配色：选中项是浅米色块 + 深色字，其余是浅灰字
+private val NavSelectedBg = Color(0xFFEDE7DC)
+private val NavSelectedFg = Color(0xFF16181D)
+private val NavFocusBg = Color(0xFF2563EB)
+private val LobbyBgTop = Color(0xFF0B1526)
+private val LobbyBgBottom = Color(0xFF05080F)
+private val CatSelected = Color(0xFFF1F5F9)
+
+/**
+ * 电视大厅：左侧导航（频道 / 信号源 / 设置）+ 分类栏 + 频道列表。
+ *
+ * 结构照抄市面上空壳播放器（观屿、酷九）的三栏布局，
+ * 但只留用户要的三项，不做搜索和收藏——多两项就要多一层焦点跳转，
+ * 遥控器上每多一次左右键都是成本。
+ *
+ * 手机端不走这里：手机是全屏播放 + 半屏抽屉，那套交互比大厅快。
+ */
+@Composable
+internal fun LobbyPanel(
+    isTv: Boolean,
+    tab: LobbyTab,
+    onTab: (LobbyTab) -> Unit,
+    navFocusTrigger: Int = 0,
+    blocks: List<ChannelSourceBlock>,
+    activeId: String?,
+    currentId: String?,
+    onPick: (ChannelSourceBlock, Channel) -> Unit,
+    onSwitchSource: (Source) -> Unit,
+    sources: List<Source>,
+    lockedId: String?,
+    pairInfo: PairInfo?,
+    pending: List<DraftSource>,
+    message: String,
+    current: Channel?,
+    onLock: (Source) -> Unit,
+    onEdit: (Source) -> Unit,
+    onSaveDraft: (DraftSource) -> Unit,
+    onDropDraft: (DraftSource) -> Unit,
+    onAddManual: (String, String, String) -> String?,
+    onRefresh: () -> Unit,
+    decoder: String,
+    errorCode: String = "",
+    decodeMode: DecodeMode,
+    onDecodeMode: (DecodeMode) -> Unit,
+    keyUpNext: Boolean,
+    onKeyUpNext: (Boolean) -> Unit,
+    updateUrl: String,
+    onUpdateUrl: (String) -> Unit,
+    onClose: () -> Unit,
+) {
+    val navFocus = remember { LobbyTab.entries.map { FocusRequester() }.toList() }
+    // 首次进入和每次切页都把焦点落到导航上：否则焦点留在刚消失的列表里，
+    // 遥控器就「按了没反应」。
+    LaunchedEffect(isTv) {
+        if (!isTv) return@LaunchedEffect
+        // 侧栏刚打开：焦点落到「当前页」的导航项（第四点），别让方向键在没焦点的界面里乱跳
+        runCatching { navFocus[tab.ordinal].requestFocus() }
+    }
+    LaunchedEffect(tab, navFocusTrigger) {
+        if (!isTv) return@LaunchedEffect
+        // 切页后、或左键回导航时，把焦点明确带回当前页的导航项。
+        // 焦点由 tab 驱动，而不是反过来——这样「焦点到哪」和「显示哪页」永远一致。
+        runCatching { navFocus[tab.ordinal].requestFocus() }
+    }
+
+    // 参考图的形态是「侧边浮层」，不是独占全屏：
+    // 左侧一条半透明面板（导航 + 分类 + 频道），右边留出三成屏幕看正在播的画面。
+    Box(
+        Modifier.fillMaxSize()
+            .background(Color(0x59040A14))
+            .pointerInput(Unit) { detectTapGestures { onClose() } },
+    ) {
+        Row(
+            Modifier.fillMaxHeight().fillMaxWidth(if (isTv) 0.72f else 0.88f)
+                .background(Brush.horizontalGradient(listOf(Color(0xF2081020), Color(0xDC081020))))
+                // 吞掉面板内的点击，避免点到列表就把整个侧栏关掉
+                .pointerInput(Unit) { detectTapGestures { } },
+        ) {
+            NavRail(
+                isTv = isTv,
+                current = tab,
+                focusRequests = navFocus,
+                onTab = onTab,
+                onClose = onClose,
+            )
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+                when (tab) {
+                    LobbyTab.Channels -> ChannelPage(
+                        isTv = isTv,
+                        blocks = blocks,
+                    activeId = activeId,
+                    currentId = currentId,
+                    onPick = onPick,
+                    onSwitchSource = onSwitchSource,
+                )
+                    LobbyTab.Sources -> SourcesPage(
+                        sources = sources,
+                        activeId = activeId,
+                        lockedId = lockedId,
+                        onSwitch = onSwitchSource,
+                        onLock = onLock,
+                        onEdit = onEdit,
+                    )
+                    LobbyTab.Settings -> SettingsPage(
+                        current = current,
+                        sources = sources,
+                        activeId = activeId,
+                        lockedId = lockedId,
+                        decoder = decoder,
+                        errorCode = errorCode,
+                        decodeMode = decodeMode,
+                        onDecodeMode = onDecodeMode,
+                        keyUpNext = keyUpNext,
+                        onKeyUpNext = onKeyUpNext,
+                        onRefresh = onRefresh,
+                        updateUrl = updateUrl,
+                        onUpdateUrl = onUpdateUrl,
+                        pairInfo = pairInfo,
+                        pending = pending,
+                        onSaveDraft = onSaveDraft,
+                        onDropDraft = onDropDraft,
+                        isTv = isTv,
+                        onAddManual = onAddManual,
+                        onLock = onLock,
+                        onEdit = onEdit,
+                        onSwitchSource = onSwitchSource,
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ── 一级导航 ────────────────────────────────────────────────────────
+
+@Composable
+private fun NavRail(
+    isTv: Boolean,
+    current: LobbyTab,
+    focusRequests: List<FocusRequester>,
+    onTab: (LobbyTab) -> Unit,
+    onClose: () -> Unit,
+) {
+    Column(
+        Modifier.fillMaxHeight()
+            .width(if (isTv) 150.dp else 116.dp)
+            .padding(top = if (isTv) 34.dp else 20.dp, bottom = if (isTv) 28.dp else 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            "直播",
+            color = Color(0xFF64748B),
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.fillMaxWidth().padding(start = 26.dp, bottom = 18.dp),
+        )
+        LobbyTab.entries.forEach { t ->
+            NavItem(
+                tab = t,
+                isTv = isTv,
+                selected = t == current,
+                focusRequester = focusRequests[t.ordinal],
+                // 焦点一到就切页（第五点）：遥控器上下移到「信号源」，右边内容立刻跟着换，
+                // 不再需要按 OK 确认。这是切页的唯一真相源，按键桥不参与，避免两套机制打架。
+                onFocused = { if (isTv) onTab(t) },
+                onClick = { onTab(t) },
+            )
+            Spacer(Modifier.height(if (isTv) 6.dp else 4.dp))
+        }
+        Spacer(Modifier.weight(1f))
+        // 版本号摆在大厅里：换了新包一眼就能确认，不用翻设置
+        Text(
+            "v" + rememberVersionName(),
+            color = Color(0xFF334155),
+            fontSize = 11.sp,
+            modifier = Modifier.fillMaxWidth().padding(start = 26.dp, bottom = 6.dp),
+        )
+        Text(
+            if (isTv) "返回键 关闭" else "点旁边 关闭",
+            color = Color(0xFF475569),
+            fontSize = 12.sp,
+            modifier = Modifier.fillMaxWidth().padding(start = 26.dp)
+                .clickable { onClose() },
+        )
+    }
+}
+
+@Composable
+private fun NavItem(
+    tab: LobbyTab,
+    isTv: Boolean,
+    selected: Boolean,
+    focusRequester: FocusRequester,
+    onFocused: () -> Unit,
+    onClick: () -> Unit,
+) {
+    var focused by remember { mutableStateOf(false) }
+    val bg = when {
+        focused -> NavFocusBg
+        selected -> NavSelectedBg
+        else -> Color.Transparent
+    }
+    val fg = when {
+        focused -> Color.White
+        selected -> NavSelectedFg
+        else -> Color(0xFFB6C2D2)
+    }
+    Row(
+        Modifier.fillMaxWidth(0.82f)
+            .height(if (isTv) 54.dp else 46.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(bg)
+            // 焦点一到就切页 —— 这是「按到信号源就出信号源页」的唯一驱动源。
+            .onFocusChanged {
+                focused = it.isFocused
+                if (it.isFocused) onFocused()
+            }
+            .focusRequester(focusRequester)
+            .then(if (isTv) Modifier.focusable() else Modifier)
+            .clickable { onClick() }
+            .padding(horizontal = if (isTv) 16.dp else 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        NavIcon(tab, fg)
+        Spacer(Modifier.width(if (isTv) 12.dp else 8.dp))
+        Text(
+            tab.label,
+            color = fg,
+            fontSize = if (isTv) 20.sp else 16.sp,
+            fontWeight = if (selected || focused) FontWeight.SemiBold else FontWeight.Normal,
+        )
+    }
+}
+
+/** 导航图标全部自绘：只为三个小图标引整包 material-icons 不划算。 */
+@Composable
+private fun NavIcon(tab: LobbyTab, color: Color) {
+    Canvas(Modifier.size(21.dp)) {
+        val w = size.width
+        val h = size.height
+        when (tab) {
+            // 频道：一台电视（圆角屏幕 + 两根天线）
+            LobbyTab.Channels -> {
+                val stroke = Stroke(width = w * 0.09f, cap = StrokeCap.Round)
+                drawRoundRect(
+                    color = color,
+                    topLeft = Offset(w * 0.08f, h * 0.30f),
+                    size = Size(w * 0.84f, h * 0.60f),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(w * 0.12f),
+                    style = stroke,
+                )
+                drawLine(color, Offset(w * 0.32f, h * 0.06f), Offset(w * 0.46f, h * 0.28f), w * 0.09f, StrokeCap.Round)
+                drawLine(color, Offset(w * 0.68f, h * 0.06f), Offset(w * 0.54f, h * 0.28f), w * 0.09f, StrokeCap.Round)
+            }
+            // 信号源：播放三角（和「源」= 片源的意思对上）
+            LobbyTab.Sources -> {
+                val p = Path().apply {
+                    moveTo(w * 0.24f, h * 0.16f)
+                    lineTo(w * 0.84f, h * 0.50f)
+                    lineTo(w * 0.24f, h * 0.84f)
+                    close()
+                }
+                drawPath(p, color)
+            }
+            // 设置：齿轮
+            LobbyTab.Settings -> drawGear(color, LobbyBgTop)
+        }
+    }
+}
+
+// ── 频道页：分类栏 + 频道列表 ───────────────────────────────────────
+
+@Composable
+private fun ChannelPage(
+    isTv: Boolean,
+    blocks: List<ChannelSourceBlock>,
+    activeId: String?,
+    currentId: String?,
+    onPick: (ChannelSourceBlock, Channel) -> Unit,
+    onSwitchSource: (Source) -> Unit,
+) {
+    val block = blocks.firstOrNull { it.source.id == activeId }
+        ?: blocks.firstOrNull()
+    val channels = block?.result?.channels.orEmpty()
+    val groups = block?.result?.groups.orEmpty()
+
+    // 分类：「全部」+ 源自带的分组。切源时回到「全部」，否则会停在一个新源没有的分类上
+    var category by remember(block?.source?.id) { mutableStateOf(ALL) }
+    val shown = remember(channels, groups, category) {
+        if (category == ALL || groups.none { it.name == category }) channels
+        else groups.first { it.name == category }.channels
+    }
+
+    val catFocus = remember { FocusRequester() }
+    val chFocus = remember { FocusRequester() }
+    val listState = rememberLazyListState()
+
+    // 第四点：呼出侧栏时列表先滚到「正在播放的频道」，光标一眼就落在当前台，
+    // 不用从第一个频道往下翻。只在页首次出现 / 换台后对齐一次，不干扰手动滚动。
+    LaunchedEffect(block?.source?.id, currentId) {
+        val idx = shown.indexOfFirst { it.id == currentId }
+        if (idx >= 0) {
+            runCatching { listState.scrollToItem(idx) }
+        }
+    }
+
+    Row(Modifier.fillMaxSize()) {
+        // 第二栏：源（多源时）+ 分类
+        Column(
+            Modifier.width(if (isTv) 140.dp else 116.dp).fillMaxHeight()
+                .padding(top = if (isTv) 30.dp else 20.dp, bottom = 24.dp, end = 8.dp),
+        ) {
+            LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                if (blocks.size > 1) {
+                    item(key = "cap-src") { RailCaption("信号源") }
+                    itemsIndexed(blocks, key = { _, b -> "src-" + b.source.id }) { i, b ->
+                        RailItem(
+                            text = b.source.name,
+                            selected = b.isActive,
+                            focusRequester = if (i == 0) catFocus else null,
+                            onRight = { requestFocus(chFocus) },
+                            onClick = { if (!b.isActive) onSwitchSource(b.source) },
+                        )
+                    }
+                    item(key = "gap") {
+                        Box(
+                            Modifier.fillMaxWidth(0.8f)
+                                .height(1.dp)
+                                .background(Color(0xFF1E293B))
+                                .padding(vertical = 8.dp),
+                        )
+                    }
+                }
+                item(key = "cap-cat") { RailCaption("分类") }
+                item(key = "cat-all") {
+                    RailItem(
+                        text = "全部",
+                        selected = category == ALL,
+                        focusRequester = if (blocks.size <= 1) catFocus else null,
+                        onRight = { requestFocus(chFocus) },
+                        onClick = { category = ALL },
+                    )
+                }
+                items(groups, key = { "cat-" + it.name }) { g ->
+                    RailItem(
+                        text = g.name,
+                        selected = category == g.name,
+                        onRight = { requestFocus(chFocus) },
+                        onClick = { category = g.name },
+                    )
+                }
+            }
+        }
+
+        // 第三栏：频道
+        Column(Modifier.weight(1f).fillMaxHeight()
+            .padding(top = if (isTv) 30.dp else 20.dp, bottom = 20.dp, end = if (isTv) 16.dp else 8.dp)) {
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(
+                    block?.source?.name ?: "没有源",
+                    color = Color.White,
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    "${shown.size} 个频道",
+                    color = TextDim,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(bottom = 4.dp),
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+
+            if (shown.isEmpty()) {
+                Text(
+                    when {
+                        block == null -> "还没有直播源，去「信号源」里扫码添加"
+                        block.result == null -> "这个源还没缓存：到「信号源」页点「刷新当前源」"
+                        else -> "这个分类下没有频道"
+                    },
+                    color = TextDim,
+                    fontSize = 16.sp,
+                )
+            } else {
+                val order = remember(channels) {
+                    val map = HashMap<String, Int>(channels.size * 2)
+                    channels.forEachIndexed { i, c -> map[c.id] = i + 1 }
+                    map
+                }
+                LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    items(shown, key = { it.id }) { ch ->
+                        // 焦点给「正在播放的频道」；没有当前台时才退回第一个
+                        val isFocusTarget = ch.id == currentId ||
+                            (currentId == null && ch.id == shown.first().id)
+                        LobbyChannelRow(
+                            number = order[ch.id] ?: 0,
+                            channel = ch,
+                            playing = block?.isActive == true && ch.id == currentId,
+                            modifier = if (isFocusTarget) Modifier.focusRequester(chFocus) else Modifier,
+                            onLeft = { requestFocus(catFocus) },
+                            onClick = { block?.let { onPick(it, ch) } },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private const val ALL = "全部"
+
+@Composable
+private fun RailCaption(text: String) {
+    Text(
+        text,
+        color = Color(0xFF475569),
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Medium,
+        modifier = Modifier.padding(start = 14.dp, top = 12.dp, bottom = 4.dp),
+    )
+}
+
+@Composable
+private fun RailItem(
+    text: String,
+    selected: Boolean,
+    focusRequester: FocusRequester? = null,
+    onRight: () -> Unit,
+    onClick: () -> Unit,
+) {
+    var focused by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth()
+            .height(46.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(
+                when {
+                    focused -> NavFocusBg
+                    selected -> Color(0x1AF1F5F9)
+                    else -> Color.Transparent
+                },
+            )
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .onFocusChanged { focused = it.isFocused }
+            .focusable()
+            .onKeyEvent { e ->
+                // 右键进频道列表：不给显式关系时，LazyColumn 之间的焦点搜索偶尔会跳到别处
+                if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionRight) {
+                    onRight(); true
+                } else {
+                    false
+                }
+            }
+            .clickable { onClick() }
+            .padding(start = 14.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // 选中但没有焦点时用一个细竖条表示「当前分类」，焦点态整行高亮就够，不再重复
+        Box(
+            Modifier.width(3.dp).height(18.dp)
+                .background(if (selected) Accent else Color.Transparent, RoundedCornerShape(2.dp)),
+        )
+        Spacer(Modifier.width(11.dp))
+        Text(
+            text,
+            color = when {
+                focused -> Color.White
+                selected -> CatSelected
+                else -> Color(0xFF94A3B8)
+            },
+            fontSize = 17.sp,
+            fontWeight = if (selected || focused) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** 频道行：序号 + 台标 + 名称 + 当前节目。就是参考图里那一行。 */
+@Composable
+private fun LobbyChannelRow(
+    number: Int,
+    channel: Channel,
+    playing: Boolean,
+    modifier: Modifier,
+    onLeft: () -> Unit,
+    onClick: () -> Unit,
+) {
+    var focused by remember { mutableStateOf(false) }
+    Row(
+        modifier.fillMaxWidth()
+            .height(56.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(
+                when {
+                    focused -> RowFocus
+                    playing -> Color(0x331D4ED8)
+                    else -> Color.Transparent
+                },
+            )
+            .onFocusChanged { focused = it.isFocused }
+            .focusable()
+            .onKeyEvent { e ->
+                if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft) {
+                    onLeft(); true
+                } else {
+                    false
+                }
+            }
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            if (number > 0) number.toString() else "·",
+            color = if (playing) Accent else Color(0xFF94A3B8),
+            fontSize = 15.sp,
+            fontWeight = if (playing) FontWeight.Bold else FontWeight.Normal,
+            textAlign = TextAlign.End,
+            maxLines = 1,
+            modifier = Modifier.width(40.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        ChannelLogo(channel.logo, channel.name, 38)
+        Spacer(Modifier.width(10.dp))
+        Text(
+            channel.name,
+            color = Color.White,
+            fontSize = 19.sp,
+            fontWeight = if (playing) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 130.dp),
+        )
+        // 在播的台靠整行高亮 + 蓝色序号表示；侧栏太窄，不再塞「正在播放」四个字
+        Spacer(Modifier.weight(1f))
+        // 当前节目：参考图里这个位置是节目名/「网络连接失败」一类的状态
+        Text(
+            channel.current.ifBlank { if (channel.next.isNotBlank()) "接下来 " + channel.next else "" },
+            color = if (channel.current.isBlank()) Color(0xFF64748B) else Color(0xFF86EFAC),
+            fontSize = 14.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.End,
+            modifier = Modifier.widthIn(max = 140.dp),
+        )
+    }
+}
+
+/** 台标：拉不到就显示名字首字，不留空洞。 */
+@Composable
+private fun ChannelLogo(url: String, name: String, sizeDp: Int) {
+    val bmp by produceState<Bitmap?>(initialValue = null, url) {
+        value = if (url.isBlank()) null else runCatching { LogoLoader.load(url, sizeDp * 2) }.getOrNull()
+    }
+    val b = bmp
+    if (b != null) {
+        Image(
+            bitmap = b.asImageBitmap(),
+            contentDescription = null,
+            modifier = Modifier.size(sizeDp.dp).clip(RoundedCornerShape(6.dp))
+                .background(Color(0x14FFFFFF)),
+        )
+    } else {
+        Box(
+            Modifier.size(sizeDp.dp).clip(RoundedCornerShape(6.dp))
+                .background(Color(0xFF1E293B)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                name.take(1).ifBlank { "·" },
+                color = Color(0xFF94A3B8),
+                fontSize = (sizeDp / 2.6).sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+// ── 信号源页 ────────────────────────────────────────────────────────
+
+@Composable
+private fun SourcesPage(
+    sources: List<Source>,
+    activeId: String?,
+    lockedId: String?,
+    onSwitch: (Source) -> Unit,
+    onLock: (Source) -> Unit,
+    onEdit: (Source) -> Unit,
+) {
+    // 第四点：光标停在「当前正在用的源」上，不是永远落在第一条
+    val activeFocus = remember { FocusRequester() }
+    val listState = rememberLazyListState()
+    LaunchedEffect(activeId, sources.size) {
+        val idx = sources.indexOfFirst { it.id == activeId }
+        if (idx >= 0) runCatching { listState.scrollToItem(idx) }
+        // 焦点不主动抢到内容区——否则上下键变成滚列表，第五点的导航切页就失灵。
+        // 当前源用 isActive 高亮 + 滚动到位来体现；用户按右键进内容区时，
+        // activeFocus 挂在它上面，Compose 焦点搜索会优先落到它。
+    }
+
+    Column(Modifier.fillMaxSize().padding(top = 30.dp, end = 24.dp)) {
+        Text("信号源", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "已添加 ${sources.size} 条源 · 点一行切换；右键到「编辑 / 锁定」，确认键执行。",
+            color = TextDim, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp, bottom = 10.dp),
+        )
+        LazyColumn(Modifier.weight(1f), state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(sources.size, key = { i -> sources[i].id }) { i ->
+                val one = sources[i]
+                SourceRow(
+                    isTv = true,
+                    tvFocusable = true,
+                    source = one,
+                    isActive = one.id == activeId,
+                    isLocked = one.id == lockedId,
+                    focusRequester = if (one.id == activeId || (activeId == null && i == 0)) activeFocus else null,
+                    onSwitch = { onSwitch(one) },
+                    onLock = { onLock(one) },
+                    onEdit = { onEdit(one) },
+                )
+            }
+            if (sources.isEmpty()) {
+                item {
+                    Text(
+                        "还没有源。到「设置」里扫二维码添加。",
+                        color = TextDim, fontSize = 15.sp,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 扫码添加源：二维码 + 配对说明 + 待保存列表。
+ * 信号源页和设置页都放一份——用户说「设置里面就要能扫码添加源」，
+ * 与其做一个点了再跳的按钮，不如直接把二维码摆在那里。
+ */
+@Composable
+private fun AddSourceQrBlock(
+    isTv: Boolean,
+    pairInfo: PairInfo?,
+    pending: List<DraftSource>,
+    onSaveDraft: (DraftSource) -> Unit,
+    onDropDraft: (DraftSource) -> Unit,
+    onAddManual: (String, String, String) -> String?,
+) {
+    val qr = remember(pairInfo?.url) { pairInfo?.let { QrEncoder.bitmap(it.url, 420) } }
+    var formOpen by remember { mutableStateOf(false) }
+    var formName by remember { mutableStateOf("") }
+    var formUrl by remember { mutableStateOf("") }
+    var formEpg by remember { mutableStateOf("") }
+    var formError by remember { mutableStateOf("") }
+    val fieldFont = if (isTv) 16.sp else 14.sp
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("添加直播源", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        // 扫码和手填并列：没带手机时也要能直接输地址，不能逼着人去另一台设备
+        TextButton(onClick = { formOpen = !formOpen }) {
+            Text(if (formOpen) "收起手动添加" else "手动添加源", fontSize = if (isTv) 14.sp else 13.sp)
+        }
+        if (formOpen) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedTextField(
+                    value = formName,
+                    onValueChange = { formName = it },
+                    label = { Text("名称", fontSize = fieldFont) },
+                    singleLine = true,
+                    textStyle = androidx.compose.material3.MaterialTheme.typography.bodyLarge.copy(fontSize = fieldFont),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = formUrl,
+                    onValueChange = { formUrl = it },
+                    label = { Text("M3U 地址（http / https）", fontSize = fieldFont) },
+                    singleLine = true,
+                    textStyle = androidx.compose.material3.MaterialTheme.typography.bodyLarge.copy(fontSize = fieldFont),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = formEpg,
+                    onValueChange = { formEpg = it },
+                    label = { Text("节目单地址（可留空）", fontSize = fieldFont) },
+                    singleLine = true,
+                    textStyle = androidx.compose.material3.MaterialTheme.typography.bodyLarge.copy(fontSize = fieldFont),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Button(onClick = {
+                        val err = onAddManual(formName.trim(), formUrl.trim(), formEpg.trim())
+                        if (err == null) {
+                            formName = ""; formUrl = ""; formEpg = ""; formError = ""
+                            formOpen = false
+                        } else {
+                            formError = err
+                        }
+                    }) { Text("保存", fontSize = if (isTv) 14.sp else 13.sp) }
+                    Spacer(Modifier.width(10.dp))
+                    TextButton(onClick = {
+                        formOpen = false; formError = ""
+                        formName = ""; formUrl = ""; formEpg = ""
+                    }) { Text("取消", fontSize = if (isTv) 14.sp else 13.sp) }
+                }
+                if (formError.isNotBlank()) {
+                    Text(formError, color = Color(0xFFFCA5A5), fontSize = if (isTv) 13.sp else 12.sp)
+                }
+            }
+        }
+        Text("扫码添加", color = TextDim, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
+        if (qr != null && pairInfo != null) {
+            // 侧栏比全屏窄，二维码与说明上下排才不会横向溢出
+            Image(
+                bitmap = qr.asImageBitmap(),
+                contentDescription = "添加源二维码",
+                modifier = Modifier.size(150.dp).background(Color.White).padding(6.dp),
+            )
+            Text("配对码 ${pairInfo.code}", color = Color.White, fontSize = 18.sp)
+            Text(
+                "手机连同一个 WiFi，用相机扫码填订阅地址；确定后先出现在「待保存」，再点保存。",
+                color = TextDim, fontSize = 12.sp,
+                modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+            )
+        } else {
+            Text("正在准备二维码…", color = TextDim, fontSize = 13.sp)
+        }
+        if (pending.isNotEmpty()) {
+            Text("待保存（${pending.size}）", color = Accent, fontSize = 14.sp)
+            pending.forEach { d ->
+                DraftRow(true, d, { onSaveDraft(d) }, { onDropDraft(d) })
+            }
+        }
+    }
+}
+
+// ── 设置页 ──────────────────────────────────────────────────────────
+
+@Composable
+private fun SettingsPage(
+    isTv: Boolean,
+    current: Channel?,
+    sources: List<Source>,
+    activeId: String?,
+    lockedId: String?,
+    decoder: String,
+    errorCode: String = "",
+    decodeMode: DecodeMode,
+    onDecodeMode: (DecodeMode) -> Unit,
+    keyUpNext: Boolean,
+    onKeyUpNext: (Boolean) -> Unit,
+    onRefresh: () -> Unit,
+    updateUrl: String,
+    onUpdateUrl: (String) -> Unit,
+    pairInfo: PairInfo?,
+    pending: List<DraftSource>,
+    onSaveDraft: (DraftSource) -> Unit,
+    onDropDraft: (DraftSource) -> Unit,
+    onAddManual: (String, String, String) -> String?,
+    onLock: (Source) -> Unit,
+    onEdit: (Source) -> Unit,
+    onSwitchSource: (Source) -> Unit,
+) {
+    val context = LocalContext.current
+    val crashLog = remember { Diag.lastCrash(context) }
+    val deviceInfo = remember { Diag.deviceInfo(context) }
+    // 不依赖 BuildConfig（AGP 8 默认不再生成），直接问系统要 versionName
+    val versionName = remember {
+        @Suppress("DEPRECATION")
+        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }
+            .getOrNull().orEmpty()
+    }
+
+    // 用 LazyColumn 而不是 Column+verticalScroll：
+    // 遥控器只能靠焦点移动来滚，verticalScroll 不响应方向键，
+    // 内容一超出屏幕下半截就永远够不到（尤其加了更新块之后）。
+    LazyColumn(
+        Modifier.fillMaxSize().padding(top = 30.dp, end = 56.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item {
+            Column {
+                Text("设置", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "现在：${current?.name ?: "未播放"}　·　源：${sources.firstOrNull { it.id == activeId }?.name ?: "无"}",
+                    color = TextDim, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+        }
+        // 已添加的源：和信号源页一样可切换/锁定/编辑，一屏看全
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("已添加的源（${sources.size}）", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                if (sources.isEmpty()) {
+                    Text("还没有源，用下面的扫码或手动添加。", color = TextDim, fontSize = 13.sp)
+                } else {
+                    sources.forEach { one ->
+                        SourceRow(
+                            isTv = isTv,
+                            tvFocusable = isTv,
+                            source = one,
+                            isActive = one.id == activeId,
+                            isLocked = one.id == lockedId,
+                            onSwitch = { onSwitchSource(one) },
+                            onLock = { onLock(one) },
+                            onEdit = { onEdit(one) },
+                        )
+                    }
+                }
+                TextButton(onClick = onRefresh) { Text("刷新信号源", fontSize = 14.sp) }
+            }
+        }
+        // 解码方式：有些老盒子硬解花屏/音画不同步，得能手动切软解
+        item {
+            LabeledRow("解码方式") {
+                DecodeMode.entries.forEach { m ->
+                    ModeChip(m.label, m == decodeMode, isTv = isTv) { onDecodeMode(m) }
+                }
+            }
+        }
+        item {
+            LabeledRow("换台键") {
+                ModeChip("上 = 下一台", keyUpNext, isTv = isTv) { onKeyUpNext(true) }
+                ModeChip("上 = 上一台", !keyUpNext, isTv = isTv) { onKeyUpNext(false) }
+            }
+        }
+        if (decoder.isNotBlank()) {
+            item {
+                val soft = decoder.startsWith("c2.android.") || decoder.startsWith("OMX.google.")
+                Text(
+                    "解码：$decoder（${if (soft) "软解，会掉帧" else "硬解"}）",
+                    color = if (soft) Color(0xFFF87171) else Color(0xFF4ADE80),
+                    fontSize = 12.sp,
+                )
+            }
+        }
+        // 最近一次错误码常驻：下次卡住能直接看出是 ERROR_CODE_IO_* 还是解码器问题
+        if (errorCode.isNotBlank()) {
+            item {
+                val decoderIssue = errorCode.contains("DECODER", ignoreCase = true)
+                Text(
+                    "最近错误：$errorCode（${if (decoderIssue) "解码器" else "多为网络/源"}）",
+                    color = Color(0xFFFCA5A5),
+                    fontSize = 12.sp,
+                )
+            }
+        }
+        item {
+            Box(
+                Modifier.fillMaxWidth(0.96f)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF101A2B))
+                    .padding(14.dp),
+            ) {
+                AddSourceQrBlock(isTv, pairInfo, pending, onSaveDraft, onDropDraft, onAddManual)
+            }
+        }
+        item {
+            Box(
+                Modifier.fillMaxWidth(0.96f)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF101A2B))
+                    .padding(14.dp),
+            ) {
+                UpdateSection(isTv = true, url = updateUrl, onUrlChange = onUpdateUrl)
+            }
+        }
+        item {
+            Column {
+                Text(deviceInfo, color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 4)
+                Text("版本 $versionName", color = Color(0xFF64748B), fontSize = 11.sp)
+                if (crashLog != null) {
+                    Text(
+                        "上次崩溃记录：" + crashLog.lineSequence().take(6).joinToString("\n"),
+                        color = Color(0xFFFCA5A5), fontSize = 10.sp, maxLines = 8,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LabeledRow(label: String, content: @Composable () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = TextDim, fontSize = 15.sp, modifier = Modifier.width(110.dp))
+        content()
+    }
+}
+
+/**
+ * 把焦点请求包一层：节点可能还没挂载，直接 requestFocus 会抛异常。
+ * 大厅里到处是「按右键跳到下一栏」，每次都得防一手。
+ */
+private fun requestFocus(fr: FocusRequester) {
+    runCatching { fr.requestFocus() }
+}
+
+/** 系统里读到的版本名（不依赖 BuildConfig）。 */
+@Composable
+private fun rememberVersionName(): String {
+    val context = LocalContext.current
+    return remember {
+        @Suppress("DEPRECATION")
+        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }
+            .getOrNull().orEmpty()
+    }
+}

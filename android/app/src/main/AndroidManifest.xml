@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 在线更新：下载完 APK 要调起系统安装器。8.0 起还要用户在系统里单独允许一次 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!-- 同一 APK 同时装到手机与 TV：leanback 与 touchscreen 都必须声明为「非必需」 -->
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <application
+        android:name=".App"
+        android:allowBackup="true"
+        android:banner="@drawable/tv_banner"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.IPTVPlayer"
+        android:usesCleartextTraffic="true"
+        android:supportsRtl="true">
+
+        <!-- 手机入口。
+             configChanges 必须声明：切全屏时改 requestedOrientation，若走默认重建流程，
+             Activity 会销毁并释放播放器，表现为切全屏黑屏、进度归零。 -->
+        <activity
+            android:name=".ui.mobile.MobileActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode|density">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- TV 入口：缺了 LEANBACK_LAUNCHER，应用不会出现在电视主屏 -->
+        <activity
+            android:name=".ui.tv.TvActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.IPTVPlayer.TV"
+            android:banner="@drawable/tv_banner"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode|density">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 安装包要用 content:// 交给系统安装器；Android 7+ 直接给 file:// 会闪退 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+</manifest>
