@@ -1,6 +1,6 @@
 {
-  "versionCode": 21,
-  "versionName": "0.4.7",
-  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.4.7/iptv-player-0.4.7.apk",
-  "notes": "魅影TV 新图标与名称统一；退后台停播、OK/双击暂停、菜单键呼出侧栏；切页与光标定位修复；新增换台预热（同分组下一个台，停 3 秒触发，失败静默）。手机与电视端均可自动检查更新。"
+  "versionCode": 22,
+  "versionName": "0.4.8",
+  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.4.8/iptv-player-0.4.8.apk",
+  "notes": "修复设置页滚不到顶/底（纯文字块可聚焦）；修复频道页右键进不了节目列表（当前台不在分类时焦点回退第一行、跳转失败不再吞按键）。"
 }
