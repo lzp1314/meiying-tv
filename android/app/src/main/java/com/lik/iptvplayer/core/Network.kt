@@ -43,9 +43,14 @@ object Network {
             .followRedirects(true)
             .followSslRedirects(true)
         appContext?.let { ctx ->
-            runCatching { Trust.sslSocketFactory(ctx) }.getOrNull()?.let { (sf, tm) ->
-                builder.sslSocketFactory(sf, tm)
-            }
+            runCatching { Trust.sslSocketFactory(ctx) }
+                .onFailure { Trust.markFailed(it) }
+                .getOrNull()
+                ?.let { (sf, tm) ->
+                    // 再兜一层：即便 OkHttp 这一侧不接受，也绝不能把整个客户端搞挂
+                    runCatching { builder.sslSocketFactory(sf, tm) }
+                        .onFailure { Trust.markFailed(it) }
+                }
         }
         builder.build()
     }

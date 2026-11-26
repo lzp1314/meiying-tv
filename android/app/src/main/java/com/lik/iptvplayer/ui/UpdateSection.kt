@@ -30,6 +30,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lik.iptvplayer.core.ApkInstaller
+import com.lik.iptvplayer.core.Trust
 import com.lik.iptvplayer.core.UpdateChecker
 import com.lik.iptvplayer.core.UpdateInfo
 import kotlinx.coroutines.Dispatchers
@@ -56,6 +57,8 @@ internal fun UpdateSection(
     var info by remember { mutableStateOf<UpdateInfo?>(null) }
     var progress by remember { mutableStateOf(-1f) }
     var editing by remember(url) { mutableStateOf(url) }
+    // 证书兜底状态：检查一次后把结果同步上来，出问题时能直接看到是哪一环
+    var certStatus by remember { mutableStateOf(Trust.status) }
 
     val labelSize = if (isTv) 15.sp else 13.sp
     val bodySize = if (isTv) 13.sp else 11.sp
@@ -87,6 +90,7 @@ internal fun UpdateSection(
                 .onFailure { e ->
                     status = "检查失败：${e.message ?: e.javaClass.simpleName}"
                 }
+            certStatus = Trust.status
             busy = false
         }
     }
@@ -209,5 +213,13 @@ internal fun UpdateSection(
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             )
         }
+
+        // 现场诊断：兜底没生效时，这行会写明是系统 CA 拷贝失败还是内置证书加载失败
+        Text(
+            "证书兜底：" + certStatus,
+            color = if (certStatus.startsWith("失败")) Color(0xFFF87171) else Color(0xFF64748B),
+            fontSize = if (isTv) 11.sp else 9.sp,
+            modifier = Modifier.padding(top = 4.dp),
+        )
     }
 }
