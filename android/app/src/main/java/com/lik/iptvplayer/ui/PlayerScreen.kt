@@ -259,6 +259,16 @@ fun PlayerScreen(
     // toast 要先于下面的错误回调定义：回调里要写它
     var toast by remember { mutableStateOf<String?>(null) }
 
+    // 返回键二次确认：正常播放时按一次只提示，2 秒内再按才真退出。
+    // 侧栏/出错界面里返回键另有含义，见下面的按键桥。
+    var backArmed by remember { mutableStateOf(false) }
+    LaunchedEffect(backArmed) {
+        if (backArmed) {
+            delay(2000)
+            backArmed = false
+        }
+    }
+
     // 播放异常状态：重试中给轻提示，3 次失败后常驻屏幕；错误码始终保留供 OSD/设置显示
     var fatalError by remember { mutableStateOf<PlaybackIssue?>(null) }
     var errorCode by remember { mutableStateOf("") }
@@ -393,13 +403,19 @@ fun PlayerScreen(
         val e = VlcEngine(context.applicationContext)
         e.onStarted = { fatalError = null }
         e.onError = { msg ->
-            // 两个引擎都失败了，这条流基本没救。明确告诉用户，别让它一直转圈等。
+            // 分清「引擎自己没起来」和「这条流播不动」：
+            // 前者换台也没用，得看设置里的诊断；后者才是换台/换源。
+            val engineBroken = msg.startsWith("VLC 引擎未就绪") || msg.startsWith("VLC 画面组件挂载失败")
             fatalError = PlaybackIssue(
-                code = "VLC_FAILED",
+                code = if (engineBroken) "VLC_INIT_FAILED" else "VLC_FAILED",
                 message = msg,
                 stage = PlaybackIssue.Stage.GAVE_UP,
                 attempt = 0,
-                hint = "ExoPlayer 和 VLC 都播不了这个台，多为地址失效或码流已损坏，建议换台或换源",
+                hint = if (engineBroken) {
+                    "VLC 引擎没起来，这台机器先用 ExoPlayer；原因见「设置 → VLC 引擎」那一行"
+                } else {
+                    "ExoPlayer 和 VLC 都播不了这个台，多为地址失效或码流已损坏，建议换台或换源"
+                },
             )
         }
         vlcHolder.engine = e
@@ -430,8 +446,15 @@ fun PlayerScreen(
                 startEngine(false, ch)
                 return
             }
-            // 引擎对象建好了，但 native 层可能仍然没起来（buildEngine 全部失败时 initError 非空）
-            if (engine.initError.isNotBlank()) vlcDiag = engine.initError
+            // 引擎对象建好了，但 native 层可能仍然没起来（buildEngine 两档全失败时 initError 非空）。
+            // 这时绝不能切 usingVlc：画面层是空的，用户只会看到黑屏加一句「引擎未就绪」。
+            // 直接退回 ExoPlayer，至少这个台还有机会播。
+            if (engine.initError.isNotBlank()) {
+                vlcDiag = engine.initError
+                toast = "VLC 引擎没起来，改用 ExoPlayer（原因见设置页）"
+                startEngine(false, ch)
+                return
+            }
             controller.stop()
             usingVlc = true
             // ExoPlayer 的编码/解码器诊断对 VLC 不成立，留着只会误导排查
@@ -788,7 +811,10 @@ fun PlayerScreen(
                 // 侧栏打开：方向键与 OK 全放行；菜单键再按一次关闭（开关语义）
                 panel == Panel.Lobby -> when (key) {
                     KeyEvent.KEYCODE_MENU -> { panel = null; true }
-                    KeyEvent.KEYCODE_BACK -> false
+                    // 返回键 = 关侧栏。以前这里返回 false，事件落到 Activity 就把整个 App 退了；
+                    // 消费掉 ACTION_DOWN 后系统不会再走 onBackPressed（onKeyUp 需要 tracking，而 tracking
+                    // 只在 onKeyDown 里才开始），所以这一个 true 就够。
+                    KeyEvent.KEYCODE_BACK -> { panel = null; true }
                     else -> false
                 }
                 // 出错时把按键让给「重试 / 再试一次」按钮，否则按 OK 只会切暂停。
@@ -796,6 +822,8 @@ fun PlayerScreen(
                 // 不给开设置的话那句提示就成了废话。
                 loadError != null || fatalError != null -> when (key) {
                     KeyEvent.KEYCODE_MENU -> { openLobby(LobbyTab.Settings); true }
+                    // 出错界面的返回 = 回频道列表换台，不是退出 App
+                    KeyEvent.KEYCODE_BACK -> { openLobby(LobbyTab.Channels); true }
                     else -> false
                 }
                 // 数字键换台：按 1 = 第 1 台；1、0 = 第 10 台。
@@ -838,6 +866,18 @@ fun PlayerScreen(
                 // 左键也保留呼出，作为没有菜单键遥控器的备选
                 key == KeyEvent.KEYCODE_DPAD_LEFT -> {
                     openLobby(); true
+                }
+                // 正常播放时的返回：第一次只提示，2 秒内再按一次才真的退出。
+                // 遥控器很容易误碰返回键，直接退 App 体验太差。
+                key == KeyEvent.KEYCODE_BACK -> {
+                    if (backArmed) {
+                        backArmed = false
+                        false
+                    } else {
+                        backArmed = true
+                        toast = "再按一次返回键退出"
+                        true
+                    }
                 }
                 else -> false
             }
@@ -1056,7 +1096,11 @@ fun PlayerScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text(
-                        "播放失败 · 已重试 3 次",
+                        when {
+                            fatal.code == "VLC_INIT_FAILED" -> "播放失败 · VLC 引擎没起来"
+                            fatal.attempt > 0 -> "播放失败 · 已重试 ${fatal.attempt} 次"
+                            else -> "播放失败"
+                        },
                         color = Color(0xFFFCA5A5),
                         fontSize = if (isTv) 22.sp else 17.sp,
                         fontWeight = FontWeight.SemiBold,
@@ -1099,6 +1143,14 @@ fun PlayerScreen(
                             },
                         ) {
                             Text("再试一次", fontSize = if (isTv) 16.sp else 14.sp)
+                        }
+                        // 出错时最常用的动作其实是「换个台」。没有这个按钮，
+                        // 遥控器上只能靠返回键——而返回键以前是直接退 App。
+                        TextButton(
+                            onClick = { openLobby(LobbyTab.Channels) },
+                            modifier = Modifier.padding(start = 6.dp),
+                        ) {
+                            Text("换台", fontSize = if (isTv) 16.sp else 14.sp)
                         }
                         // 一键换引擎：比让用户自己摸进设置里找「播放引擎」快得多，
                         // 也是这台机器上最可能真正解决问题的一步。

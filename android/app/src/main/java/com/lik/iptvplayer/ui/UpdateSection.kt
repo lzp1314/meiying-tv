@@ -59,6 +59,8 @@ internal fun UpdateSection(
     var editing by remember(url) { mutableStateOf(url) }
     // 证书兜底状态：检查一次后把结果同步上来，出问题时能直接看到是哪一环
     var certStatus by remember { mutableStateOf(Trust.status) }
+    // 这次清单是从哪个地址拿到的。多镜像之后必须能看到这个，否则出问题只能靠猜
+    var lastSource by remember { mutableStateOf("") }
 
     val labelSize = if (isTv) 15.sp else 13.sp
     val bodySize = if (isTv) 13.sp else 11.sp
@@ -79,13 +81,19 @@ internal fun UpdateSection(
             progress = -1f
             status = "正在检查…"
             runCatching { UpdateChecker.check(editing) }
-                .onSuccess { i ->
+                .onSuccess { r ->
+                    val i = r.info
                     if (i.versionCode > myCode) {
                         info = i
-                        status = "发现新版本 v${i.versionName}（当前 v$myName）"
+                        status = buildString {
+                            append("发现新版本 v${i.versionName}（当前 v$myName）")
+                            if (r.skipped > 0) append(" · 跳过 ${r.skipped} 个不可用地址")
+                            if (!r.verified) append(" · 证书已降级，下载后会校验哈希")
+                        }
                     } else {
                         status = "已是最新：v$myName"
                     }
+                    lastSource = r.source
                 }
                 .onFailure { e ->
                     status = "检查失败：${e.message ?: e.javaClass.simpleName}"
@@ -103,13 +111,21 @@ internal fun UpdateSection(
             status = "正在下载 ${i.versionName}…"
             val dest = File(ApkInstaller.dir(context), "iptv-${i.versionCode}.apk")
             runCatching {
-                UpdateChecker.download(i.apkUrl, dest) { p ->
+                UpdateChecker.download(
+                    apkUrl = i.apkUrl,
+                    dest = dest,
+                    sha256 = i.sha256,
+                    fallbacks = i.apkFallbacks,
+                ) { p ->
                     // 回调在 IO 线程，切回主线程再写状态
                     scope.launch(Dispatchers.Main) { progress = p }
                 }
             }.onSuccess { apk ->
                 progress = 1f
-                if (!ApkInstaller.canInstall(context)) {
+                // 先验签名再调安装器：证书降级通道下，这是最后一道「包没被换过」的关卡
+                if (!ApkInstaller.signatureMatches(context, apk)) {
+                    status = "安装包签名与本机不一致，已拒绝安装（可能被篡改，或下错了包）"
+                } else if (!ApkInstaller.canInstall(context)) {
                     status = "还需要允许「安装未知应用」：已打开系统设置，允许后回来再点一次下载"
                     if (!ApkInstaller.openUnknownSourcesSettings(context)) {
                         status = "请到系统设置里允许本应用安装未知应用，再重试"
@@ -164,6 +180,16 @@ internal fun UpdateSection(
                 },
                 fontSize = bodySize,
                 modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+
+        // 清单到底是从哪个地址拿到的：多镜像之后，这行是排障第一现场
+        if (lastSource.isNotBlank()) {
+            Text(
+                "清单来源：" + lastSource,
+                color = Color(0xFF64748B),
+                fontSize = if (isTv) 11.sp else 9.sp,
+                modifier = Modifier.padding(top = 4.dp),
             )
         }
 

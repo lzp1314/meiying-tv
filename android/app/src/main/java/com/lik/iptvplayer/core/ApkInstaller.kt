@@ -2,6 +2,7 @@ package com.lik.iptvplayer.core
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -53,4 +54,48 @@ object ApkInstaller {
         context.startActivity(i)
         true
     }.getOrDefault(false)
+
+    /**
+     * 安装包的签名证书里，是不是有一张和当前已装版本相同。
+     *
+     * 更新通道在证书校验失败时会降级（见 [UpdateTransport]），真实性靠 update.json 里的
+     * sha256 保证。这里再加一道：**包必须出自同一张签名证书**，否则就是被换过的包。
+     * 系统安装器其实也会拦（签名不同装不上），但它报的是「应用未安装」，
+     * 用户完全看不懂；这里提前拦下并给出人话。
+     */
+    fun signatureMatches(context: Context, apk: File): Boolean = runCatching {
+        val pm = context.packageManager
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            PackageManager.GET_SIGNING_CERTIFICATES
+        } else {
+            @Suppress("DEPRECATION")
+            PackageManager.GET_SIGNATURES
+        }
+        @Suppress("DEPRECATION")
+        val archive = pm.getPackageArchiveInfo(apk.absolutePath, flags) ?: return@runCatching false
+        @Suppress("DEPRECATION")
+        val mine = pm.getPackageInfo(context.packageName, flags)
+        val a = signaturesOf(archive)
+        val b = signaturesOf(mine)
+        // 只要有一张证书对得上就放行：证书轮换期间新旧两张会同时存在
+        a.isNotEmpty() && b.isNotEmpty() && a.any { it in b }
+    }.getOrDefault(false)
+
+    private fun signaturesOf(info: android.content.pm.PackageInfo): Set<String> {
+        val out = mutableSetOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val si = info.signingInfo ?: return out
+            val certs = if (si.hasMultipleSigners()) si.apkContentsSigners else si.signingCertificateHistory
+            certs?.forEach { out += sha256(it.toByteArray()) }
+        } else {
+            @Suppress("DEPRECATION")
+            info.signatures?.forEach { out += sha256(it.toByteArray()) }
+        }
+        return out
+    }
+
+    private fun sha256(bytes: ByteArray): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { "%02x".format(it) }
 }

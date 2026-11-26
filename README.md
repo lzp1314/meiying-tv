@@ -54,14 +54,20 @@ cd android
 
 ```json
 {
-  "versionCode": 21,
-  "versionName": "0.4.7",
-  "apk": "apk/iptv-player-0.4.7.apk",
+  "versionCode": 28,
+  "versionName": "0.5.2",
+  "apk": "https://…/iptv-player-0.5.2.apk",
+  "apkFallback": ["https://…/镜像地址.apk"],
+  "sha256": "安装包的 sha256",
   "notes": "本版更新说明"
 }
 ```
 
 `apk` 写相对路径时按 update.json 所在目录拼接。`versionCode` 必须严格大于已安装版本，否则 App 判为「已最新」。仓库需公开，私有仓库的 raw 链接 App 读不到。
+
+清单地址支持多镜像：内置地址失败会自动换 `fastly.jsdelivr.net`、`cdn.jsdelivr.net`、GitHub raw 依次重试（用户自己改过地址则只用自己的）。`apkFallback` 是下载备用地址，主地址失败时依次尝试。
+
+`sha256` 是更新通道的安全底座：部分老设备（如运营商定制的 Android 9 盒子）无法验证 Gitee 的 TrustAsia 证书链，客户端会在证书校验失败时降级重试，此时**安装包的真实性完全由 sha256 保证**，另外安装前还会核对 APK 签名证书与本机已装版本一致。缺省该字段则跳过哈希校验（仅兼容老清单，不推荐）。
 
 ## 设计取舍
 

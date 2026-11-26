@@ -91,19 +91,27 @@ class VlcEngine(context: Context) {
         // 先单独探一次原生库：失败就是 ABI/安装包问题，跟参数无关，要分开报
         val soError = runCatching { System.loadLibrary("vlcjni") }.exceptionOrNull()
 
+        // ⚠️ 必须是**可写** List。
+        // 反编译 libvlc-all:3.6.5 的 LibVLC 构造函数可以看到，它拿到 options 后不拷贝，
+        // 直接往调用方的 list 里 add("--aout=android_audiotrack")、
+        // add("--android-display-chroma")、add("RV16")。传 Kotlin 的 listOf()/emptyList()
+        // 是只读集合，一 add 就抛
+        //   UnsupportedOperationException: Operation is not supported for read-only collection
+        // 0.5.0～0.5.1 的「VLC 引擎初始化失败」就是这么来的——引擎一次都没起来过。
         val attempts = listOf(
-            listOf(
+            mutableListOf(
                 "--avcodec-hw=any",
                 "--network-caching=1500",
                 "--live-caching=1500",
                 "--no-sub-autodetect-file",
             ),
-            emptyList(),
+            mutableListOf(),
         )
         var last: Throwable? = null
         for (opts in attempts) {
             try {
-                val vlc = LibVLC(appContext, opts)
+                // 每次再包一层 ArrayList：libVLC 会就地污染这个 list，第二档不能复用
+                val vlc = LibVLC(appContext, ArrayList(opts))
                 val mp = MediaPlayer(vlc)
                 mp.volume = 100
                 mp.setEventListener { event ->
@@ -185,15 +193,16 @@ class VlcEngine(context: Context) {
         }
         if (!attachViewsIfPossible()) {
             // 视图可能还没进窗口（Compose 首帧），先记下来，attach 后自动续播；
-            // 同时给一个短看门狗，真挂不上要明说，不能黑屏干等
+            // 同时给一个看门狗：老盒子上首帧要一两秒，等 4 秒还挂不上才认输，
+            // 太短会误报「视图未进入窗口」，太长用户就对着黑屏干等。
             pending = channel
-            awaitAttach(retries = 12)
+            awaitAttach(retries = 40)
             return
         }
         playNow(channel)
     }
 
-    /** 视图进窗口通常在一两帧内，最多等约 1.2 秒；等不到就报错。 */
+    /** 视图进窗口通常在一两帧内，最多等约 4 秒；等不到就报错。 */
     private fun awaitAttach(retries: Int) {
         if (attachViewsIfPossible()) {
             pending?.let { ch ->

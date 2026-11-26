@@ -68,17 +68,32 @@ APK_URL=$(grep 'http' /tmp/meiying_apk_url.txt | sed 's/附件直链: //')
 cat /tmp/meiying_apk_url.txt
 
 # 4. 写 update.json（版本从 build.gradle.kts 读，避免手写出错）
-python - "$APK_URL" "$NOTES" <<'PY'
-import json, sys, re
-url, notes = sys.argv[1:3]
+#    sha256 是更新通道的安全底座：客户端在证书校验被降级时靠它确认包没被换过。
+#    apkFallback 指向 GitHub Release，Gitee 抽风时自动换路。
+python - "$APK_URL" "$NOTES" "$VERSION" "$APK" <<'PY'
+import json, sys, re, hashlib
+url, notes, version, apk_path = sys.argv[1:5]
 src = open("android/app/build.gradle.kts", encoding="utf-8").read()
 code = int(re.search(r"versionCode\s*=\s*(\d+)", src).group(1))
 name = re.search(r'versionName\s*=\s*"([^"]+)"', src).group(1)
-data = {"versionCode": code, "versionName": name, "apk": url, "notes": notes}
+h = hashlib.sha256()
+with open(apk_path, "rb") as f:
+    for chunk in iter(lambda: f.read(1 << 20), b""):
+        h.update(chunk)
+fallback = ("https://github.com/lzp1314/meiying-tv/releases/download/v%s/iptv-player-%s.apk"
+            % (version, version))
+data = {
+    "versionCode": code,
+    "versionName": name,
+    "apk": url,
+    "apkFallback": [fallback],
+    "sha256": h.hexdigest(),
+    "notes": notes,
+}
 with open("release/update.json", "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
     f.write("\n")
-print("update.json 已更新: vc%s / %s" % (code, name))
+print("update.json 已更新: vc%s / %s / sha256=%s" % (code, name, h.hexdigest()[:16]))
 PY
 
 # 5. 提交并双推（GitHub 默认分支是 main，master 也要同步，避免主页显示空仓库）
@@ -88,11 +103,18 @@ git push origin main:master
 git push github main
 git push github main:master
 
-# 6. 端到端验证：线上 update.json -> 匿名下载 -> MD5 比对
-ONLINE=$(curl -sL "https://gitee.com/lzp-zl/meiying-tv/raw/master/release/update.json" \
-  | python -c "import sys,json; print(json.load(sys.stdin)['apk'])")
+# 6. 端到端验证：线上 update.json -> 匿名下载 -> MD5 + sha256 比对
+ONLINE_JSON=$(curl -sL "https://gitee.com/lzp-zl/meiying-tv/raw/master/release/update.json")
+ONLINE=$(printf '%s' "$ONLINE_JSON" | python -c "import sys,json; print(json.load(sys.stdin)['apk'])")
+ONLINE_SHA=$(printf '%s' "$ONLINE_JSON" | python -c "import sys,json; print(json.load(sys.stdin).get('sha256',''))")
 echo "线上 apk: $ONLINE"
-curl -sL --max-time 180 -o /tmp/meiying_verify.apk "$ONLINE"
+curl -sL --max-time 900 -o /tmp/meiying_verify.apk "$ONLINE"
 LOCAL_MD5=$(md5sum "$APK" | cut -d' ' -f1)
 REMOTE_MD5=$(md5sum /tmp/meiying_verify.apk | cut -d' ' -f1)
-[ "$LOCAL_MD5" = "$REMOTE_MD5" ] && echo "✅ 发布成功：匿名下载可用，MD5 一致" || { echo "❌ MD5 不一致"; exit 1; }
+LOCAL_SHA=$(sha256sum "$APK" | cut -d' ' -f1)
+[ "$LOCAL_MD5" = "$REMOTE_MD5" ] && echo "✅ 匿名下载可用，MD5 一致" || { echo "❌ MD5 不一致"; exit 1; }
+if [ -n "$ONLINE_SHA" ]; then
+  [ "$LOCAL_SHA" = "$ONLINE_SHA" ] && echo "✅ 清单里的 sha256 与本地包一致" || { echo "❌ sha256 不一致（清单写的和实际包不符）"; exit 1; }
+else
+  echo "⚠️ update.json 没有 sha256 字段"
+fi
