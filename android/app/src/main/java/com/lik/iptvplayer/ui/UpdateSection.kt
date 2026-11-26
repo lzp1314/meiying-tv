@@ -122,8 +122,10 @@ internal fun UpdateSection(
                 }
             }.onSuccess { apk ->
                 progress = 1f
-                // 先验签名再调安装器：证书降级通道下，这是最后一道「包没被换过」的关卡
-                if (!ApkInstaller.signatureMatches(context, apk)) {
+                // 先验签名再调安装器：证书降级通道下，这是最后一道「包没被换过」的关卡。
+                // 只有确凿的不一致才拦；本机读不出签名（老定制固件常见）交给系统安装器判决。
+                val sig = ApkInstaller.checkSignature(context, apk)
+                if (sig == ApkInstaller.SigCheck.MISMATCH) {
                     status = "安装包签名与本机不一致，已拒绝安装（可能被篡改，或下错了包）"
                 } else if (!ApkInstaller.canInstall(context)) {
                     status = "还需要允许「安装未知应用」：已打开系统设置，允许后回来再点一次下载"
@@ -132,6 +134,8 @@ internal fun UpdateSection(
                     }
                 } else if (!ApkInstaller.install(context, apk)) {
                     status = "系统安装器没能打开。安装包已存到：${apk.absolutePath}"
+                } else if (sig == ApkInstaller.SigCheck.UNKNOWN) {
+                    status = "本机读不出包签名，已交给系统安装器判断（下载哈希已核对过）"
                 } else {
                     status = "已调起安装器，按提示覆盖安装即可（数据会保留）"
                 }

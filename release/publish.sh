@@ -1,19 +1,146 @@
 #!/usr/bin/env bash
-# 魅影TV 发版脚本：Gitee Release 附件 + 双平台代码推送
+# 魅影TV 发版脚本：Gitee Release 附件 + 双平台代码推送 + 清单镜像复查
 #
 # 用法（在仓库根目录执行）：
-#   GITEE_TOKEN=你的令牌 ./release/publish.sh 0.4.7 "本次更新说明"
+#   GITEE_TOKEN=你的令牌 ./release/publish.sh 0.5.3 "本次更新说明"
+#   ./release/publish.sh --verify-only     # 只复查镜像清单，不发布（自测/事后补救用）
 #
 # 前提：APK 已编译并复制到 release/apk/iptv-player-<版本>.apk
 # 令牌只从环境变量读，不写进任何文件；用后可从 Gitee 删除重建。
 
 set -euo pipefail
 
-VERSION="${1:?用法: GITEE_TOKEN=xxx ./release/publish.sh 0.4.7 \"更新说明\"}"
-NOTES="${2:-魅影TV 更新}"
-TAG="v${VERSION}"
 OWNER="lzp-zl"
 REPO="meiying-tv"
+GH_OWNER="lzp1314"
+GH_REPO="meiying-tv"
+
+# --- curl 的证书吊销检查 ---------------------------------------------------
+# Windows 自带 curl 走 schannel，国内网络连不上吊销服务器会直接判失败
+# （0x80092012 CRYPT_E_REVOCATION_OFFLINE，表现为 HTTP 000）。发版机上加
+# --ssl-no-revoke 跳过这一步即可；Linux/macOS 的 curl 没有该开关，探测后再决定。
+CURL_SSL=""
+if curl --help all >/dev/null 2>&1; then CURL_HELP=$(curl --help all); else CURL_HELP=$(curl --help); fi
+printf '%s' "$CURL_HELP" | grep -q -- "--ssl-no-revoke" && CURL_SSL="--ssl-no-revoke"
+
+# 客户端 UpdateChecker.MIRRORS 里的三个地址，改一处必须改两处
+M_GITEE="https://gitee.com/${OWNER}/${REPO}/raw/master/release/update.json"
+M_RAW="https://raw.githubusercontent.com/${GH_OWNER}/${GH_REPO}/master/release/update.json"
+M_JS="https://fastly.jsdelivr.net/gh/${GH_OWNER}/${GH_REPO}@master/release/update.json"
+PURGE_JS="https://purge.jsdelivr.net/gh/${GH_OWNER}/${GH_REPO}@master/release/update.json"
+
+EXPECT_CODE=""
+EXPECT_NAME=""
+EXPECT_SHA=""
+
+# 从本地清单读期望值（版本号以 build.gradle.kts 为准，这里只是复核）
+# 注意 tr -d '\r'：Windows 下 Python 的 stdout 会把 \n 转成 \r\n，不清理的话
+# 最后一个字段会粘一个回车，比较永远不相等（表现为主通道明明更新了却判失败）。
+load_expect() {
+  local code name sha line
+  line=$(python -c "
+import json
+d = json.load(open('release/update.json', encoding='utf-8'))
+print(d['versionCode'], d['versionName'], (d.get('sha256') or '')[:16])
+" | tr -d '\r')
+  read -r code name sha <<< "$line"
+  EXPECT_CODE="$code"; EXPECT_NAME="$name"; EXPECT_SHA="$sha"
+}
+
+# 拉一份清单，输出 "code|name|sha16|错误片段"
+mirror_state() {
+  local body
+  body=$(curl -sL $CURL_SSL --max-time 18 "$1" 2>/dev/null || true)
+  printf '%s' "$body" | python -c "
+import sys, json
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+    print('%s|%s|%s|' % (d.get('versionCode'), d.get('versionName'), (d.get('sha256') or '')[:16]))
+except Exception:
+    print('|||' + (raw[:40].replace('\n', ' ') or 'empty'))
+" | tr -d '\r'
+}
+
+is_expected() {
+  local s="$1" code name sha rest
+  IFS='|' read -r code name sha rest <<< "$s"
+  [ "$code" = "$EXPECT_CODE" ] || return 1
+  [ "$name" = "$EXPECT_NAME" ] || return 1
+  if [ -n "$EXPECT_SHA" ] && [ "$sha" != "$EXPECT_SHA" ]; then return 1; fi
+  return 0
+}
+
+purge_jsdelivr() {
+  local r
+  r=$(curl -sL $CURL_SSL --max-time 25 "$PURGE_JS" 2>/dev/null || true)
+  printf '%s' "$r" | python -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    paths = d.get('paths', {})
+    ok = bool(paths) and all(v.get('providers') for v in paths.values())
+    print('   purge: %s%s' % (d.get('status'), ' / providers 全清' if ok else ' / providers 未全清'))
+except Exception:
+    print('   purge: 无响应（忽略，继续复查）')
+"
+}
+
+# 复查三个镜像：主通道不一致就算发版失败，jsDelivr 只告警（分支缓存不完全可控）
+verify_mirrors() {
+  local round s_g='' s_r='' s_j='' ok_g=0 ok_r=0 ok_j=0
+  echo ""
+  echo "=== 清单镜像复查（期望 vc${EXPECT_CODE} / ${EXPECT_NAME}）==="
+  for round in 1 2 3 4 5 6; do
+    case "$round" in
+      1|3) purge_jsdelivr ;;
+    esac
+    if [ "$ok_g" = 0 ]; then s_g=$(mirror_state "$M_GITEE"); is_expected "$s_g" && ok_g=1 || true; fi
+    if [ "$ok_r" = 0 ]; then s_r=$(mirror_state "$M_RAW");   is_expected "$s_r" && ok_r=1 || true; fi
+    if [ "$ok_j" = 0 ]; then s_j=$(mirror_state "$M_JS");    is_expected "$s_j" && ok_j=1 || true; fi
+
+    if [ "$ok_g" = 1 ] && [ "$ok_r" = 1 ] && [ "$ok_j" = 1 ]; then
+      echo "   第 ${round} 轮全部就绪"
+      break
+    fi
+    if [ "$round" -lt 6 ]; then
+      echo "   第 ${round} 轮未全部就绪（gitee=$ok_g raw=$ok_r jsdelivr=$ok_j），10 秒后重试"
+      sleep 10
+    fi
+  done
+
+  report() {
+    local mark="❌"
+    [ "$3" = 1 ] && mark="✅"
+    printf '  %s %-12s %s\n' "$mark" "$1" "${2:-无响应}"
+  }
+  report "Gitee raw"   "$s_g" "$ok_g"
+  report "GitHub raw"  "$s_r" "$ok_r"
+  report "jsDelivr"    "$s_j" "$ok_j"
+
+  if [ "$ok_g" = 0 ] || [ "$ok_r" = 0 ]; then
+    echo "❌ 主通道清单与发布版本不一致：先确认 git push 是否成功、raw 是否有边缘缓存"
+    return 1
+  fi
+  if [ "$ok_j" = 0 ]; then
+    echo "⚠️ jsDelivr 仍返回旧清单（分支缓存），不影响本次发布；"
+    echo "   稍后重跑 ./release/publish.sh --verify-only 再确认，或等缓存自然过期。"
+    return 0
+  fi
+  echo "✅ 三个镜像清单与发布版本一致"
+}
+
+# --- --verify-only：不发布，只复查 ---------------------------------------
+if [ "${1:-}" = "--verify-only" ]; then
+  [ -f release/update.json ] || { echo "找不到 release/update.json"; exit 1; }
+  load_expect
+  verify_mirrors
+  exit $?
+fi
+
+VERSION="${1:?用法: GITEE_TOKEN=xxx ./release/publish.sh 0.5.3 \"更新说明\"}"
+NOTES="${2:-魅影TV 更新}"
+TAG="v${VERSION}"
 APK="release/apk/iptv-player-${VERSION}.apk"
 TOKEN="${GITEE_TOKEN:?请先设置环境变量 GITEE_TOKEN}"
 
@@ -21,7 +148,7 @@ TOKEN="${GITEE_TOKEN:?请先设置环境变量 GITEE_TOKEN}"
 echo "发布 $TAG -> $APK ($(wc -c < "$APK") bytes)"
 
 # 1. 若同名 Release 已存在则删掉重建（避免 Gitee 同名 tag 冲突）
-existing=$(curl -s "https://gitee.com/api/v5/repos/${OWNER}/${REPO}/releases?access_token=${TOKEN}" \
+existing=$(curl -s $CURL_SSL "https://gitee.com/api/v5/repos/${OWNER}/${REPO}/releases?access_token=${TOKEN}" \
   | python -c "import sys,json; d=json.load(sys.stdin); print(next((r['id'] for r in d if r['tag_name']=='$TAG'), ''))" 2>/dev/null || true)
 if [ -n "$existing" ]; then
   echo "删除旧 Release $existing"
@@ -104,11 +231,11 @@ git push github main
 git push github main:master
 
 # 6. 端到端验证：线上 update.json -> 匿名下载 -> MD5 + sha256 比对
-ONLINE_JSON=$(curl -sL "https://gitee.com/lzp-zl/meiying-tv/raw/master/release/update.json")
+ONLINE_JSON=$(curl -sL $CURL_SSL "https://gitee.com/${OWNER}/${REPO}/raw/master/release/update.json")
 ONLINE=$(printf '%s' "$ONLINE_JSON" | python -c "import sys,json; print(json.load(sys.stdin)['apk'])")
 ONLINE_SHA=$(printf '%s' "$ONLINE_JSON" | python -c "import sys,json; print(json.load(sys.stdin).get('sha256',''))")
 echo "线上 apk: $ONLINE"
-curl -sL --max-time 900 -o /tmp/meiying_verify.apk "$ONLINE"
+curl -sL $CURL_SSL --max-time 900 -o /tmp/meiying_verify.apk "$ONLINE"
 LOCAL_MD5=$(md5sum "$APK" | cut -d' ' -f1)
 REMOTE_MD5=$(md5sum /tmp/meiying_verify.apk | cut -d' ' -f1)
 LOCAL_SHA=$(sha256sum "$APK" | cut -d' ' -f1)
@@ -118,3 +245,9 @@ if [ -n "$ONLINE_SHA" ]; then
 else
   echo "⚠️ update.json 没有 sha256 字段"
 fi
+
+# 7. 清单镜像：先刷 jsDelivr 分支缓存，再延迟复查三个地址是否都已经是这一版
+#    jsDelivr 对 @branch 的清单有小时级缓存，不清的话客户端在 Gitee 失败时会读到上一版，
+#    表现就是「明明发版了，检查更新却说已是最新」。
+load_expect
+verify_mirrors

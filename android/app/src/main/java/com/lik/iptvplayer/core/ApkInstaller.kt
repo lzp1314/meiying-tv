@@ -55,38 +55,85 @@ object ApkInstaller {
         true
     }.getOrDefault(false)
 
+    /** 签名核对结果：只有 [MISMATCH] 才该拦，[UNKNOWN] 表示本机读不出来。 */
+    enum class SigCheck { MATCH, MISMATCH, UNKNOWN }
+
     /**
-     * 安装包的签名证书里，是不是有一张和当前已装版本相同。
+     * 核对安装包的签名证书，是否是已安装版本的同一条 lineage。
      *
-     * 更新通道在证书校验失败时会降级（见 [UpdateTransport]），真实性靠 update.json 里的
-     * sha256 保证。这里再加一道：**包必须出自同一张签名证书**，否则就是被换过的包。
-     * 系统安装器其实也会拦（签名不同装不上），但它报的是「应用未安装」，
-     * 用户完全看不懂；这里提前拦下并给出人话。
+     * 为什么要有 [UNKNOWN]：Android 9 一类定制固件（HG680-GC）上
+     * `getPackageArchiveInfo` 解析独立 APK 的 v3 签名会返回 null，包明明是好的也读不出来。
+     * 早期版本把「读不出」当成「不一致」，直接把正版包拒了。
+     * 现在读不出来就交给系统安装器判决——它对签名是强制校验，真不一致一定装不上，
+     * 我们这层只负责把错误翻译成人话，不该反过来误杀。
      */
-    fun signatureMatches(context: Context, apk: File): Boolean = runCatching {
-        val pm = context.packageManager
-        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            PackageManager.GET_SIGNING_CERTIFICATES
+    fun checkSignature(context: Context, apk: File): SigCheck {
+        val mine = runCatching { installedCerts(context) }.getOrDefault(emptySet())
+        if (mine.isEmpty()) return SigCheck.UNKNOWN
+
+        // 第一条路：系统解析 APK。flags 同时带新旧两个常量，兼容只认 GET_SIGNATURES 的 ROM。
+        val fromApk = runCatching { archiveCerts(context, apk) }.getOrDefault(emptySet())
+            // 第二条路：直接读 APK 里的 v1 签名证书（META-INF/*.RSA），不依赖 ROM 的解析器
+            .ifEmpty { runCatching { v1Certs(apk) }.getOrDefault(emptySet()) }
+
+        if (fromApk.isEmpty()) return SigCheck.UNKNOWN
+        return if (fromApk.any { it in mine }) SigCheck.MATCH else SigCheck.MISMATCH
+    }
+
+    /** 老调用点用：除了确凿的「不一致」，都放行。 */
+    fun signatureMatches(context: Context, apk: File): Boolean =
+        checkSignature(context, apk) != SigCheck.MISMATCH
+
+    @Suppress("DEPRECATION")
+    private fun signFlags(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            PackageManager.GET_SIGNING_CERTIFICATES or PackageManager.GET_SIGNATURES
         } else {
-            @Suppress("DEPRECATION")
             PackageManager.GET_SIGNATURES
         }
-        @Suppress("DEPRECATION")
-        val archive = pm.getPackageArchiveInfo(apk.absolutePath, flags) ?: return@runCatching false
-        @Suppress("DEPRECATION")
-        val mine = pm.getPackageInfo(context.packageName, flags)
-        val a = signaturesOf(archive)
-        val b = signaturesOf(mine)
-        // 只要有一张证书对得上就放行：证书轮换期间新旧两张会同时存在
-        a.isNotEmpty() && b.isNotEmpty() && a.any { it in b }
-    }.getOrDefault(false)
+
+    @Suppress("DEPRECATION")
+    private fun installedCerts(context: Context): Set<String> =
+        signaturesOf(context.packageManager.getPackageInfo(context.packageName, signFlags()))
+
+    @Suppress("DEPRECATION")
+    private fun archiveCerts(context: Context, apk: File): Set<String> {
+        val info = context.packageManager.getPackageArchiveInfo(apk.absolutePath, signFlags())
+            ?: return emptySet()
+        return signaturesOf(info)
+    }
+
+    /** 读 APK 的 v1 签名（JAR signing）证书。纯文件解析，绕开各 ROM 的 PackageParser 差异。 */
+    private fun v1Certs(apk: File): Set<String> = java.util.zip.ZipFile(apk).use { zip ->
+        val out = mutableSetOf<String>()
+        val factory = java.security.cert.CertificateFactory.getInstance("X.509")
+        zip.entries().asSequence()
+            .filter { e ->
+                !e.isDirectory && e.name.startsWith("META-INF/", ignoreCase = true) && (
+                    e.name.endsWith(".RSA", ignoreCase = true) ||
+                        e.name.endsWith(".DSA", ignoreCase = true) ||
+                        e.name.endsWith(".EC", ignoreCase = true)
+                    )
+            }
+            .forEach { e ->
+                runCatching {
+                    zip.getInputStream(e).use { input ->
+                        val cert = factory.generateCertificate(input)
+                            as java.security.cert.X509Certificate
+                        out += sha256(cert.encoded)
+                    }
+                }
+            }
+        out
+    }
 
     private fun signaturesOf(info: android.content.pm.PackageInfo): Set<String> {
         val out = mutableSetOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val si = info.signingInfo ?: return out
-            val certs = if (si.hasMultipleSigners()) si.apkContentsSigners else si.signingCertificateHistory
-            certs?.forEach { out += sha256(it.toByteArray()) }
+            // 两个来源都收：多签看 apkContentsSigners，证书轮换看 history
+            runCatching { si.apkContentsSigners?.forEach { out += sha256(it.toByteArray()) } }
+            runCatching { si.signingCertificateHistory?.forEach { out += sha256(it.toByteArray()) } }
         } else {
             @Suppress("DEPRECATION")
             info.signatures?.forEach { out += sha256(it.toByteArray()) }

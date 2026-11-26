@@ -57,15 +57,17 @@ object UpdateChecker {
     /**
      * 备用清单地址，按顺序试。
      *
-     * - jsDelivr 走 GlobalSign 链，Android 9 的老设备一定认，等于绕开 Gitee 的信任链问题；
-     *   代价是分支内容有缓存（几小时），发布后短时间内可能读到上一版。
-     * - GitHub raw 兜底，国内常被墙，但多一条路总比没有强。
+     * - GitHub raw 紧跟 Gitee：两者都是「推完立刻生效」，不会读到上一版。国内常被墙，
+     *   但失败得很快（DNS 污染/连接拒绝），不会像 CDN 那样让你误以为已是最新。
+     * - jsDelivr 走 GlobalSign 链，Android 9 的老设备一定认，是绕开 Gitee 信任链问题的主力；
+     *   代价是分支内容有小时级缓存，发版后短时间内可能读到上一版，所以排在 raw 之后，
+     *   并且发版脚本会主动 purge + 复查（release/publish.sh）。
+     * - cdn.jsdelivr.net 已移除：2026-11 实测直连与代理都 SSL 握手失败，留着只会白等超时。
      */
     val MIRRORS: List<String> = listOf(
         DEFAULT_URL,
-        "https://fastly.jsdelivr.net/gh/lzp1314/meiying-tv@master/release/update.json",
-        "https://cdn.jsdelivr.net/gh/lzp1314/meiying-tv@master/release/update.json",
         "https://raw.githubusercontent.com/lzp1314/meiying-tv/master/release/update.json",
+        "https://fastly.jsdelivr.net/gh/lzp1314/meiying-tv@master/release/update.json",
     )
 
     /** 更新包上限 200MB，防呆。 */
