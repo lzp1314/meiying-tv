@@ -1,10 +1,10 @@
 {
-  "versionCode": 30,
-  "versionName": "0.5.4",
-  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.4/iptv-player-0.5.4.apk",
+  "versionCode": 31,
+  "versionName": "0.5.5",
+  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.5/iptv-player-0.5.5.apk",
   "apkFallback": [
-    "https://github.com/lzp1314/meiying-tv/releases/download/v0.5.4/iptv-player-0.5.4.apk"
+    "https://github.com/lzp1314/meiying-tv/releases/download/v0.5.5/iptv-player-0.5.5.apk"
   ],
-  "sha256": "a8ccdc17d66bb115d9c92d2448d08b267b3876c42b564d098d3239ee5dc30234",
-  "notes": "修 0.5.3 上的一个阻塞问题：部分 Android 9 定制固件（HG680-GC 这类）点更新时误报「安装包签名与本机不一致」，正版包被拒装。\n\n根因不是签名真的不同，是这类固件解析 APK 的 v3 签名会失败，旧代码把「读不出来」当成了「不一致」。0.5.4 改成三态判断：\n· 确凿的证书不一致 —— 拦下并提示；\n· 本机读不出签名 —— 改读包内 META-INF 证书比对；\n· 仍读不出 —— 交给系统安装器判断（系统对签名是强制校验，真被换过一定装不上）。\n\n更新清单的备用地址同步调整为 Gitee → GitHub raw → jsDelivr，去掉已无法连接的 cdn.jsdelivr，并在发版流程里自动刷新 jsDelivr 缓存、延迟复查三个镜像。"
+  "sha256": "55d47d6af320c7f5f9545fa13c763cf18555d41da3adf543d039d90a2aef5154",
+  "notes": "1) 侧栏导航按到哪就切到哪页，不用再按确认键：上下键改在焦点系统捕获阶段直接切页并搬焦点，分类栏/频道行的双焦点节点合并。\n2) 切分组从该组第一个台开始：切分类、换源都会把列表滚回第一行；呼出侧栏仍定位到正在播的台。\n3) 首次进列表不再那么卡：侧栏快照只在源变化时读取（原来每次切页都重读几 MB JSON）；台标请求最多 3 个并发、失败 5 分钟内不重发；设置→诊断新增启动耗时打点（启动→首帧 / 读缓存 / 拉源 / 引擎）。\n4) 设置页拆成播放、信号源、在线更新、诊断、关于五张独立卡片，纯文字的诊断和关于也能用遥控器滚到。"
 }
