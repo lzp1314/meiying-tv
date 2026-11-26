@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.graphics.Bitmap
 import android.media.AudioManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.KeyEvent
 import android.view.View
@@ -308,9 +309,10 @@ fun PlayerScreen(
 
     // 频道列表要列出「所有源」：当前源用内存结果，其余源读本地快照（不联网，打开即出）
     var otherChannels by remember { mutableStateOf<Map<String, RefreshResult>>(emptyMap()) }
-    LaunchedEffect(panel, lobbyTab, sources, activeId) {
-        val need = panel == Panel.Lobby && lobbyTab == LobbyTab.Channels
-        if (!need) return@LaunchedEffect
+    // 0.5.4 把 panel / lobbyTab 也放在 key 里，导致每次切页都把每个源的快照
+    // 重新读一遍、解析一遍（几 MB JSON）。老盒子上就是一次明显卡顿。
+    // 快照只取决于「有哪些源」和「哪个是当前源」，跟面板开没开无关。
+    LaunchedEffect(sources, activeId) {
         val map = mutableMapOf<String, RefreshResult>()
         for (s in sources) {
             if (s.id == activeId) continue
@@ -623,6 +625,7 @@ fun PlayerScreen(
         }
         // ExoPlayer 真出画面 = 这个引擎对这个台有效，记下来供 AUTO 下次直接用
         controller.onFirstFrame = {
+            Diag.BootTiming.markFirstFrame(if (usingVlc) "VLC" else "ExoPlayer")
             val ch = current
             val sid = activeId
             if (ch != null && sid != null) repo.prefs.rememberEngine(sid, ch, PlayEngine.EXO)
@@ -703,7 +706,9 @@ fun PlayerScreen(
         repo.markUsed(id)
         loadError = null
         scope.launch {
+            val cacheStart = SystemClock.elapsedRealtime()
             val cached = repo.loadCached(id)
+            Diag.BootTiming.markCache(SystemClock.elapsedRealtime() - cacheStart)
             if (cached != null) {
                 result = cached
                 message = "${cached.channels.size} 个频道 · ${ageText(repo.cacheAge(id))}"
@@ -715,6 +720,7 @@ fun PlayerScreen(
             // 有缓存时静默刷新：不显示「正在加载」，画面照常播
             loading = cached == null
             if (cached == null) message = "正在拉取频道与节目单…"
+            val refreshStart = SystemClock.elapsedRealtime()
             repo.refresh(id).fold(
                 onSuccess = { r ->
                     loading = false
@@ -743,6 +749,7 @@ fun PlayerScreen(
                     }
                 },
             )
+            Diag.BootTiming.markRefresh(SystemClock.elapsedRealtime() - refreshStart)
         }
     }
 

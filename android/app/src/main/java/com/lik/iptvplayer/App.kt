@@ -16,6 +16,8 @@ class App : Application() {
         super.onCreate()
         // 先装崩溃日志：低配盒子闪退时 adb 往往连不上，只能靠落盘的堆栈取证
         Diag.install(this)
+        // 冷启动计时起点：四个阶段耗时显示在设置→诊断，用来定位「首次打开慢」卡在哪
+        Diag.BootTiming.markStart()
         // 网络层要拿到 Context 才能加载内置 CA：老 Android 设备信任库缺 TrustAsia 新根，
         // 不做这步在线更新会直接报 Unacceptable certificate
         Network.init(this)

@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -55,7 +56,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -334,9 +335,12 @@ private fun NavItem(
                 focused = it.isFocused
                 if (it.isFocused) onFocused()
             }
-            // 上下键自己处理：不把换页寄托在焦点系统的自动导航上
-            .onKeyEvent { e ->
-                if (!isTv || e.type != KeyEventType.KeyDown) return@onKeyEvent false
+            // 上下键走「捕获阶段」：0.5.4 用 onKeyEvent（冒泡阶段），
+            // 事件先被焦点节点和 ROM 的方向键导航吃掉，实机表现是「高亮动了、页面不换，
+            // 必须再按一次 OK」。onPreviewKeyEvent 在焦点系统处理之前就拿到按键，
+            // 直接切页 + 主动把焦点搬到新导航项，不依赖 onFocusChanged 是否可靠。
+            .onPreviewKeyEvent { e ->
+                if (!isTv || e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 when (e.key) {
                     Key.DirectionUp -> { onNavStep(-1); true }
                     Key.DirectionDown -> { onNavStep(1); true }
@@ -428,12 +432,22 @@ private fun ChannelPage(
     // 修法：目标行优先当前台，不在 shown 里就退回第一行，保证永远有挂载点。
     val focusTargetId = if (shown.any { it.id == currentId }) currentId else shown.firstOrNull()?.id
 
-    // 第四点：呼出侧栏时列表先滚到「正在播放的频道」，光标一眼就落在当前台，
-    // 不用从第一个频道往下翻。只在页首次出现 / 换台后对齐一次，不干扰手动滚动。
+    // 呼出侧栏 / 换源 / 换台：定位到正在播放的台。
+    // 当前台不在新源里时必须回第一行——否则会沿用上一次的 index，
+    // 用户选了第二组却看到「第 51 台」开始的错位列表。
     LaunchedEffect(block?.source?.id, currentId) {
         val idx = shown.indexOfFirst { it.id == currentId }
-        if (idx >= 0) {
-            runCatching { listState.scrollToItem(idx) }
+        runCatching { listState.scrollToItem(if (idx >= 0) idx else 0) }
+    }
+
+    // 切分类（全部 → 第二组）必须从这个组的第一个台开始。
+    // 不能并进上面那条 Effect：切分类时 currentId 没变，那条不会重跑，
+    // 但 shown 已经换成另一组了，滚动位置还停在上一次的 index。
+    var lastCategory by remember(block?.source?.id) { mutableStateOf(category) }
+    LaunchedEffect(category) {
+        if (category != lastCategory) {
+            runCatching { listState.scrollToItem(0) }
+            lastCategory = category
         }
     }
 
@@ -579,8 +593,9 @@ private fun RailItem(
             .focusRing(focused, shape)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .onFocusChanged { focused = it.isFocused }
-            .focusable()
-            .onKeyEvent { e ->
+            // 只留 clickable 一个焦点节点。原来这里还叠了 focusable()，
+            // 焦点到底落在哪个节点不确定，onFocusChanged 因此时灵时不灵。
+            .onPreviewKeyEvent { e ->
                 // 右键进频道列表：跳成功才消费；跳失败放行给 Compose 的焦点搜索兜底。
                 // 以前无条件返回 true，目标没挂载时就把事件吞了，焦点卡在分类栏。
                 if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionRight) {
@@ -639,8 +654,8 @@ private fun LobbyChannelRow(
             )
             .focusRing(focused, shape)
             .onFocusChanged { focused = it.isFocused }
-            .focusable()
-            .onKeyEvent { e ->
+            // 同上：clickable 是唯一焦点节点，不再叠加 focusable()
+            .onPreviewKeyEvent { e ->
                 // 左键回分类栏：跳成功才消费，跳失败让 Compose 兜底
                 if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft) {
                     onLeft()
@@ -917,13 +932,15 @@ private fun SettingsPage(
     // 用 LazyColumn 而不是 Column+verticalScroll：
     // 遥控器只能靠焦点移动来滚，verticalScroll 不响应方向键，
     // 内容一超出屏幕下半截就永远够不到（尤其加了更新块之后）。
+    // 0.5.5 起按功能拆成五张卡片：播放 / 信号源 / 在线更新 / 诊断 / 关于。
+    // 原来所有设置平铺在一列里，用户说「看着都挤在一块，很乱」。
     LazyColumn(
         Modifier.fillMaxSize().padding(top = 30.dp, end = 56.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
+        // 顶部锚点：LazyColumn 只会滚到「有焦点的 item」。标题原来是不可聚焦的
+        // 纯 Text，焦点落到下面的按钮后就再也回不到最上面（用户实机反馈）。
         item {
-            // 顶部锚点：LazyColumn 只会滚到「有焦点的 item」。标题原来是不可聚焦的
-            // 纯 Text，焦点落到下面的按钮后就再也回不到最上面（用户实机反馈）。
             FocusableBlock {
                 Column {
                     Text("设置", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.SemiBold)
@@ -934,10 +951,43 @@ private fun SettingsPage(
                 }
             }
         }
-        // 已添加的源：和信号源页一样可切换/锁定/编辑，一屏看全
+
+        // ① 播放：解码方式 / 播放引擎 / 换台键
         item {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("已添加的源（${sources.size}）", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            SettingCard("播放") {
+                LabeledRow("解码方式") {
+                    DecodeMode.entries.forEach { m ->
+                        ModeChip(m.label, m == decodeMode, isTv = isTv) { onDecodeMode(m) }
+                    }
+                }
+                LabeledRow("播放引擎") {
+                    PlayEngine.entries.forEach { e ->
+                        ModeChip(e.label, e == playEngine, isTv = isTv) { onPlayEngine(e) }
+                    }
+                }
+                Text(
+                    when (playEngine) {
+                        PlayEngine.AUTO -> "自动：默认 ExoPlayer，6 秒没画面或解码失败自动换 VLC；谁真放出画面就记住谁，下次直接用。手动切过也算数。"
+                        PlayEngine.EXO -> "ExoPlayer：启动快、省内存，但播不了 MPEG-2 视频和 AC3 音频的老源。"
+                        PlayEngine.VLC -> "VLC：兼容性最强，几乎所有源都能播；内存占用更高，老盒子可能略卡。"
+                    },
+                    color = Color(0xFF94A3B8),
+                    fontSize = 12.sp,
+                )
+                LabeledRow("换台键") {
+                    ModeChip("上 = 下一台", keyUpNext, isTv = isTv) { onKeyUpNext(true) }
+                    ModeChip("上 = 上一台", !keyUpNext, isTv = isTv) { onKeyUpNext(false) }
+                }
+            }
+        }
+
+        // ② 信号源：已添加的源 + 扫码 / 手填
+        item {
+            SettingCard("信号源") {
+                Text(
+                    "已添加 ${sources.size} 条源 · 点一行切换；右键到「编辑 / 锁定」，确认键执行。",
+                    color = TextDim, fontSize = 13.sp,
+                )
                 if (sources.isEmpty()) {
                     Text("还没有源，用下面的扫码或手动添加。", color = TextDim, fontSize = 13.sp)
                 } else {
@@ -955,122 +1005,56 @@ private fun SettingsPage(
                     }
                 }
                 TextButton(onClick = onRefresh) { Text("刷新信号源", fontSize = 14.sp) }
-            }
-        }
-        // 解码方式：有些老盒子硬解花屏/音画不同步，得能手动切软解
-        item {
-            LabeledRow("解码方式") {
-                DecodeMode.entries.forEach { m ->
-                    ModeChip(m.label, m == decodeMode, isTv = isTv) { onDecodeMode(m) }
-                }
-            }
-        }
-        // 播放引擎：ExoPlayer 播不了的台（MPEG-2 / AC3 / 非标准 TS）换 VLC 就能播
-        item {
-            LabeledRow("播放引擎") {
-                PlayEngine.entries.forEach { e ->
-                    ModeChip(e.label, e == playEngine, isTv = isTv) { onPlayEngine(e) }
-                }
-            }
-        }
-        item {
-            Text(
-                when (playEngine) {
-                    PlayEngine.AUTO -> "自动：默认 ExoPlayer，6 秒没画面或解码失败自动换 VLC；谁真放出画面就记住谁，下次直接用。手动切过也算数。"
-                    PlayEngine.EXO -> "ExoPlayer：启动快、省内存，但播不了 MPEG-2 视频和 AC3 音频的老源。"
-                    PlayEngine.VLC -> "VLC：兼容性最强，几乎所有源都能播；内存占用更高，老盒子可能略卡。"
-                },
-                color = Color(0xFF64748B),
-                fontSize = 12.sp,
-                modifier = Modifier.fillMaxWidth(0.96f),
-            )
-        }
-        item {
-            LabeledRow("换台键") {
-                ModeChip("上 = 下一台", keyUpNext, isTv = isTv) { onKeyUpNext(true) }
-                ModeChip("上 = 上一台", !keyUpNext, isTv = isTv) { onKeyUpNext(false) }
-            }
-        }
-        // 解码信息 / 错误码只在诊断时看，不单独占焦点位——纯文字跟随相邻项滚动即可。
-        // 焦点点越少，遥控器上下翻页越顺，不会被「只看不按」的诊断文字打断。
-        // 这一行是排查「黑屏 / 卡住 / 报错」的关键：三种现象用户听起来一样，
-        // 但视频/音频编码不同，处理方式完全不同（MPEG-2 和 AC3 都只能走 VLC）。
-        if (mediaInfo.isNotBlank()) {
-            item {
-                Text(
-                    "当前编码：$mediaInfo",
-                    color = Color(0xFF93C5FD),
-                    fontSize = 12.sp,
-                )
-            }
-        }
-        if (decoder.isNotBlank()) {
-            item {
-                val soft = decoder.startsWith("c2.android.") || decoder.startsWith("OMX.google.")
-                Text(
-                    "解码：$decoder（${if (soft) "软解，会掉帧" else "硬解"}）",
-                    color = if (soft) Color(0xFFF87171) else Color(0xFF4ADE80),
-                    fontSize = 12.sp,
-                )
-            }
-        }
-        // 最近一次错误码常驻：下次卡住能直接看出是 ERROR_CODE_IO_* 还是解码器问题
-        if (errorCode.isNotBlank()) {
-            item {
-                val decoderIssue = errorCode.contains("DECODER", ignoreCase = true)
-                Text(
-                    "最近错误：$errorCode（${if (decoderIssue) "解码器" else "多为网络/源"}）",
-                    color = Color(0xFFFCA5A5),
-                    fontSize = 12.sp,
-                )
-            }
-        }
-        // VLC 引擎自身的问题常驻：初始化/挂载失败时，这里给出真正的异常类名和 message。
-        // 没有这一行，用户只能看到「引擎初始化失败」六个字，谁也没法定位。
-        if (vlcDiag.isNotBlank()) {
-            item {
-                Text(
-                    "VLC 引擎：$vlcDiag",
-                    color = Color(0xFFFCA5A5),
-                    fontSize = 11.sp,
-                )
-            }
-        }
-        item {
-            Box(
-                Modifier.fillMaxWidth(0.96f)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFF101A2B))
-                    .padding(14.dp),
-            ) {
                 AddSourceQrBlock(isTv, pairInfo, pending, onSaveDraft, onDropDraft, onAddManual)
             }
         }
+
+        // ③ 在线更新
         item {
-            Box(
-                Modifier.fillMaxWidth(0.96f)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFF101A2B))
-                    .padding(14.dp),
-            ) {
+            SettingCard("在线更新") {
                 UpdateSection(isTv = true, url = updateUrl, onUrlChange = onUpdateUrl)
             }
         }
-        // 底部锚点：最后一项必须可聚焦，否则焦点停在「检查更新」按钮上，
-        // 下面的设备信息 / 版本 / 崩溃记录永远滚不进屏幕。
+
+        // ④ 诊断：只看不按的文字集中在一起，不再插在可操作项中间打断焦点
         item {
-            FocusableBlock {
-                Column {
-                    Text(deviceInfo, color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 4)
-                    Text("版本 $versionName", color = Color(0xFF64748B), fontSize = 11.sp)
-                    if (crashLog != null) {
-                        Text(
-                            "上次崩溃记录：" + crashLog.lineSequence().take(6).joinToString("\n"),
-                            color = Color(0xFFFCA5A5), fontSize = 10.sp, maxLines = 8,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(top = 6.dp),
-                        )
-                    }
+            SettingCard("诊断") {
+                if (mediaInfo.isNotBlank()) {
+                    Text("当前编码：$mediaInfo", color = Color(0xFF93C5FD), fontSize = 12.sp)
+                }
+                if (decoder.isNotBlank()) {
+                    val soft = decoder.startsWith("c2.android.") || decoder.startsWith("OMX.google.")
+                    Text(
+                        "解码：$decoder（${if (soft) "软解，会掉帧" else "硬解"}）",
+                        color = if (soft) Color(0xFFF87171) else Color(0xFF4ADE80),
+                        fontSize = 12.sp,
+                    )
+                }
+                if (errorCode.isNotBlank()) {
+                    val decoderIssue = errorCode.contains("DECODER", ignoreCase = true)
+                    Text(
+                        "最近错误：$errorCode（${if (decoderIssue) "解码器" else "多为网络/源"}）",
+                        color = Color(0xFFFCA5A5), fontSize = 12.sp,
+                    )
+                }
+                if (vlcDiag.isNotBlank()) {
+                    Text("VLC 引擎：$vlcDiag", color = Color(0xFFFCA5A5), fontSize = 11.sp)
+                }
+                Text("启动耗时：${Diag.BootTiming.summary()}", color = Color(0xFF93C5FD), fontSize = 11.sp)
+            }
+        }
+
+        // ⑤ 关于
+        item {
+            SettingCard("关于") {
+                Text(deviceInfo, color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 4)
+                Text("版本 $versionName", color = Color(0xFF64748B), fontSize = 11.sp)
+                if (crashLog != null) {
+                    Text(
+                        "上次崩溃记录：" + crashLog.lineSequence().take(6).joinToString("\n"),
+                        color = Color(0xFFFCA5A5), fontSize = 10.sp, maxLines = 8,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
         }
@@ -1082,6 +1066,32 @@ private fun LabeledRow(label: String, content: @Composable () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(label, color = TextDim, fontSize = 15.sp, modifier = Modifier.width(110.dp))
         content()
+    }
+}
+
+/**
+ * 设置页的一张卡片：独立圆角背景 + 标题，遥控器上下键逐块走。
+ *
+ * 0.5.5 把原来平铺的一整列拆成五块。卡片本身可聚焦，
+ * 这样纯文字的诊断/关于块也能被遥控器滚到（不可聚焦的 item 永远到不了）。
+ */
+@Composable
+private fun SettingCard(title: String, content: @Composable ColumnScope.() -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(14.dp)
+    Box(
+        Modifier.fillMaxWidth(0.97f)
+            .clip(shape)
+            .background(if (focused) Color(0xFF17263B) else Color(0xFF101A2B))
+            .focusRing(focused, shape)
+            .onFocusChanged { focused = it.isFocused }
+            .focusable()
+            .padding(16.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(title, color = Accent, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            content()
+        }
     }
 }
 
