@@ -118,9 +118,17 @@ verify_mirrors() {
   report "GitHub raw"  "$s_r" "$ok_r"
   report "jsDelivr"    "$s_j" "$ok_j"
 
-  if [ "$ok_g" = 0 ] || [ "$ok_r" = 0 ]; then
-    echo "❌ 主通道清单与发布版本不一致：先确认 git push 是否成功、raw 是否有边缘缓存"
+  if [ "$ok_g" = 0 ]; then
+    echo "❌ Gitee 主通道清单与发布版本不一致：先确认 git push 是否成功"
     return 1
+  fi
+  # 分阶段发布时 GitHub 还没推，raw 落后是预期的，不能判本次发布失败
+  if [ "$ok_r" = 0 ] && [ "${SKIP_GH_PUSH:-0}" != "1" ]; then
+    echo "❌ GitHub raw 清单与发布版本不一致：先确认 git push 是否成功、raw 是否有边缘缓存"
+    return 1
+  fi
+  if [ "$ok_r" = 0 ]; then
+    echo "⚠️ GitHub raw 尚未更新（分阶段发布，GitHub 还没推），不影响 Gitee 侧发布"
   fi
   if [ "$ok_j" = 0 ]; then
     echo "⚠️ jsDelivr 仍返回旧清单（分支缓存），不影响本次发布；"
@@ -223,12 +231,17 @@ with open("release/update.json", "w", encoding="utf-8") as f:
 print("update.json 已更新: vc%s / %s / sha256=%s" % (code, name, h.hexdigest()[:16]))
 PY
 
-# 5. 提交并双推（GitHub 默认分支是 main，master 也要同步，避免主页显示空仓库）
+# 5. 提交并推送（GitHub 默认分支是 main，master 也要同步，避免主页显示空仓库）
+#    SKIP_GH_PUSH=1 时只推 Gitee——用于「先 Gitee 验完再推 GitHub」的分平台发布。
 git add release/update.json
 git commit -m "发布魅影TV ${TAG}" || echo "无改动可提交"
 git push origin main:master
-git push github main
-git push github main:master
+if [ "${SKIP_GH_PUSH:-0}" != "1" ]; then
+  git push github main
+  git push github main:master
+else
+  echo "SKIP_GH_PUSH=1：本次只推 Gitee，GitHub 留到下一阶段"
+fi
 
 # 6. 端到端验证：线上 update.json -> 匿名下载 -> MD5 + sha256 比对
 ONLINE_JSON=$(curl -sL $CURL_SSL "https://gitee.com/${OWNER}/${REPO}/raw/master/release/update.json")
