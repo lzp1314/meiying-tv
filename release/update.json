@@ -1,6 +1,6 @@
 {
-  "versionCode": 25,
-  "versionName": "0.4.11",
-  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.4.11/iptv-player-0.4.11.apk",
-  "notes": "修复老 Android 设备（Android 7-9 运营商盒子）检查更新报 Unacceptable certificate：改用自签名根 Certum Trusted Network CA，走标准 PKIX 校验路径，并合并系统信任库；设置页新增“证书兜底”诊断行。"
+  "versionCode": 26,
+  "versionName": "0.5.0",
+  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.0/iptv-player-0.5.0.apk",
+  "notes": "内置 VLC 播放引擎兜底：硬解失败、长时间无画面、或流格式 ExoPlayer 不支持时，自动改用 VLC 重播同一路流；音频轨解码失败不再整条流报错，改为禁音轨保画面。新增遥控器数字键换台：1.6 秒内连按累积，按 OK 跳转对应序号频道。设置页新增「播放引擎」可选 自动 / ExoPlayer / VLC。安装包增至 58MB（内置 VLC 库）。"
 }
