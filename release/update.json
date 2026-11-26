@@ -1,6 +1,10 @@
 {
-  "versionCode": 26,
-  "versionName": "0.5.0",
-  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.0/iptv-player-0.5.0.apk",
-  "notes": "内置 VLC 播放引擎兜底：硬解失败、长时间无画面、或流格式 ExoPlayer 不支持时，自动改用 VLC 重播同一路流；音频轨解码失败不再整条流报错，改为禁音轨保画面。新增遥控器数字键换台：1.6 秒内连按累积，按 OK 跳转对应序号频道。设置页新增「播放引擎」可选 自动 / ExoPlayer / VLC。安装包增至 58MB（内置 VLC 库）。"
+  "versionCode": 29,
+  "versionName": "0.5.3",
+  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.3/iptv-player-0.5.3.apk",
+  "apkFallback": [
+    "https://github.com/lzp1314/meiying-tv/releases/download/v0.5.3/iptv-player-0.5.3.apk"
+  ],
+  "sha256": "7596d12878c87496cf9ad34acdf27a3133e0d8797721fcc8ba8514c137965e07",
+  "notes": "本次合并 0.5.1～0.5.3 的全部修复：\n\n1) 自动选引擎不再串台：以前某个台用 VLC 播过一次就永久记住，把本来 ExoPlayer 能流畅播的台锁死在 VLC（卡顿、重连、黑屏）。现在只有真正出画面（首帧 + 画面输出）才记 VLC，连败两次自动清记忆；VLC 失败自动回退 ExoPlayer，ExoPlayer 失败也能再回 VLC，双向兜底。\n2) 断流按错误码分流：黑屏判定从 10 秒收紧到 6 秒；HTTP 403/401 换 UA/Referer 重试三档，404/410 直接判失效不再空转，5xx 走 1/2/4 秒退避。\n3) 更新通道加多镜像（Gitee raw → jsdelivr → GitHub raw），只有证书类错误才降级校验，并新增 sha256 校验与安装前签名核对；修复 raw 302 跳转导致的下载失败。\n4) 出错界面按返回只回频道列表，不再直接退出 App；侧栏焦点移到哪一项就切对应页面。\n5) 修复内置 VLC 引擎初始化失败（视图挂载时序 + libVLC 参数容器不可变）。"
 }
