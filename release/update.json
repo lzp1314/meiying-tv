@@ -1,10 +1,10 @@
 {
-  "versionCode": 29,
-  "versionName": "0.5.3",
-  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.3/iptv-player-0.5.3.apk",
+  "versionCode": 30,
+  "versionName": "0.5.4",
+  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.4/iptv-player-0.5.4.apk",
   "apkFallback": [
-    "https://github.com/lzp1314/meiying-tv/releases/download/v0.5.3/iptv-player-0.5.3.apk"
+    "https://github.com/lzp1314/meiying-tv/releases/download/v0.5.4/iptv-player-0.5.4.apk"
   ],
-  "sha256": "7596d12878c87496cf9ad34acdf27a3133e0d8797721fcc8ba8514c137965e07",
-  "notes": "本次合并 0.5.1～0.5.3 的全部修复：\n\n1) 自动选引擎不再串台：以前某个台用 VLC 播过一次就永久记住，把本来 ExoPlayer 能流畅播的台锁死在 VLC（卡顿、重连、黑屏）。现在只有真正出画面（首帧 + 画面输出）才记 VLC，连败两次自动清记忆；VLC 失败自动回退 ExoPlayer，ExoPlayer 失败也能再回 VLC，双向兜底。\n2) 断流按错误码分流：黑屏判定从 10 秒收紧到 6 秒；HTTP 403/401 换 UA/Referer 重试三档，404/410 直接判失效不再空转，5xx 走 1/2/4 秒退避。\n3) 更新通道加多镜像（Gitee raw → jsdelivr → GitHub raw），只有证书类错误才降级校验，并新增 sha256 校验与安装前签名核对；修复 raw 302 跳转导致的下载失败。\n4) 出错界面按返回只回频道列表，不再直接退出 App；侧栏焦点移到哪一项就切对应页面。\n5) 修复内置 VLC 引擎初始化失败（视图挂载时序 + libVLC 参数容器不可变）。"
+  "sha256": "a8ccdc17d66bb115d9c92d2448d08b267b3876c42b564d098d3239ee5dc30234",
+  "notes": "修 0.5.3 上的一个阻塞问题：部分 Android 9 定制固件（HG680-GC 这类）点更新时误报「安装包签名与本机不一致」，正版包被拒装。\n\n根因不是签名真的不同，是这类固件解析 APK 的 v3 签名会失败，旧代码把「读不出来」当成了「不一致」。0.5.4 改成三态判断：\n· 确凿的证书不一致 —— 拦下并提示；\n· 本机读不出签名 —— 改读包内 META-INF 证书比对；\n· 仍读不出 —— 交给系统安装器判断（系统对签名是强制校验，真被换过一定装不上）。\n\n更新清单的备用地址同步调整为 Gitee → GitHub raw → jsDelivr，去掉已无法连接的 cdn.jsdelivr，并在发版流程里自动刷新 jsDelivr 缓存、延迟复查三个镜像。"
 }
