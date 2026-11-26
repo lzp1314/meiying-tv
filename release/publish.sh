@@ -89,7 +89,7 @@ git push github main
 git push github main:master
 
 # 6. 端到端验证：线上 update.json -> 匿名下载 -> MD5 比对
-ONLINE=$(curl -s "https://gitee.com/lzp-zl/meiying-tv/raw/master/release/update.json" \
+ONLINE=$(curl -sL "https://gitee.com/lzp-zl/meiying-tv/raw/master/release/update.json" \
   | python -c "import sys,json; print(json.load(sys.stdin)['apk'])")
 echo "线上 apk: $ONLINE"
 curl -sL --max-time 180 -o /tmp/meiying_verify.apk "$ONLINE"
