@@ -1,6 +1,6 @@
 {
-  "versionCode": 23,
-  "versionName": "0.4.9",
-  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.4.9/iptv-player-0.4.9.apk",
-  "notes": "记住上次台改用稳定标识（订阅顺序变了也不串台）、缓存保鲜延长到24小时（启动更快）；修复频道→信号源切页焦点打架；精简设置页光标并加醒目蓝色描边。"
+  "versionCode": 24,
+  "versionName": "0.4.10",
+  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.4.10/iptv-player-0.4.10.apk",
+  "notes": "修复老 Android 设备点检查更新报 Unacceptable certificate 的问题：内置 TrustAsia 根证书兜底，不再依赖系统信任库，在线更新恢复可用。"
 }
