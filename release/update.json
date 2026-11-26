@@ -1,6 +1,6 @@
 {
-  "versionCode": 22,
-  "versionName": "0.4.8",
-  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.4.8/iptv-player-0.4.8.apk",
-  "notes": "修复设置页滚不到顶/底（纯文字块可聚焦）；修复频道页右键进不了节目列表（当前台不在分类时焦点回退第一行、跳转失败不再吞按键）。"
+  "versionCode": 23,
+  "versionName": "0.4.9",
+  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.4.9/iptv-player-0.4.9.apk",
+  "notes": "记住上次台改用稳定标识（订阅顺序变了也不串台）、缓存保鲜延长到24小时（启动更快）；修复频道→信号源切页焦点打架；精简设置页光标并加醒目蓝色描边。"
 }
