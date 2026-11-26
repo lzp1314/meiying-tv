@@ -1,5 +1,6 @@
 package com.lik.iptvplayer.core
 
+import android.content.Context
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.ByteArrayOutputStream
@@ -12,6 +13,17 @@ object Network {
     private const val MAX_BYTES = 6L * 1024 * 1024
 
     /**
+     * Application Context，仅用来加载内置 CA。
+     * 必须在 [init] 里注入；没注入时客户端退回纯系统证书校验，不会崩。
+     */
+    @Volatile
+    private var appContext: Context? = null
+
+    fun init(context: Context) {
+        appContext = context.applicationContext
+    }
+
+    /**
      * 节目单上限。
      * 原来是 3MB（低内存 1.5MB），结果国内全量 XMLTV 普遍十几 MB，
      * 直接被砍成「没有节目单」——电视端看不到节目单根因就在这里。
@@ -20,22 +32,36 @@ object Network {
     const val EPG_MAX_BYTES = 32L * 1024 * 1024
     const val EPG_MAX_BYTES_LOW_RAM = 20L * 1024 * 1024
 
-    val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .build()
+    /**
+     * 惰性构建：把 [init] 注入的 Context 用上，同时保证任何调用顺序都不会抛异常。
+     * SSL 方面挂「系统信任库 + 内置 TrustAsia CA」，专治老 Android 盒子的证书链缺失。
+     */
+    val client: OkHttpClient by lazy {
+        val builder = OkHttpClient.Builder()
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+        appContext?.let { ctx ->
+            runCatching { Trust.sslSocketFactory(ctx) }.getOrNull()?.let { (sf, tm) ->
+                builder.sslSocketFactory(sf, tm)
+            }
+        }
+        builder.build()
+    }
 
     /**
      * 节目单专用客户端：内置候选可能连着试几个，单个必须尽快失败，
      * 否则四个候选串起来能让首次加载卡一分多钟。
+     * 继承 [client] 的 SSL 配置，所以老设备的证书兜底同样生效。
      */
-    private val epgClient: OkHttpClient = client.newBuilder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .callTimeout(30, TimeUnit.SECONDS)
-        .build()
+    private val epgClient: OkHttpClient by lazy {
+        client.newBuilder()
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .callTimeout(30, TimeUnit.SECONDS)
+            .build()
+    }
 
     private fun normalize(url: String): String =
         M3uParser.normalizeSourceUrl(url)
