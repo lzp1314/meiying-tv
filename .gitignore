@@ -13,6 +13,7 @@ android/captures/
 *.apk
 *.ap_
 *.aab
+*.idsig
 
 # 运行时数据：可能包含订阅地址与访问密码，绝不入库
 prototype/data/sources.json
