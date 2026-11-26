@@ -10,6 +10,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -40,8 +41,13 @@ data class PlaybackIssue(
     val attempt: Int, // 第几次重试（1..3）；卡顿恢复为 0
     /** 给用户的处置建议。空字符串表示用默认文案（沿用旧行为）。 */
     val hint: String = "",
+    /** HTTP 状态码（能挖到时带上）。403 和 404 的修法完全不同，必须让用户看见。 */
+    val http: Int? = null,
 ) {
     enum class Stage { RETRYING, GAVE_UP, STALL_RECOVER }
+
+    /** 上屏用的错误码：`ERROR_CODE_IO_BAD_HTTP_STATUS (HTTP 403)` */
+    val codeText: String get() = if (http != null) "$code (HTTP $http)" else code
 
     val kind: String = when {
         code.contains("DECODER", ignoreCase = true) -> "解码器"
@@ -115,6 +121,23 @@ class PlayerController(
 
     private val appContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * 请求头兜底档位（防盗链专用）。
+     *
+     * 国内源 403 的绝大多数原因是 UA / Referer 校验：
+     * 频道自带 #EXTVLCOPT 就先用它，被拒了再依次换「播放器 UA」「浏览器 UA + 站内 Referer」。
+     * 这是 TiviMate / Perfect Player 这类成熟播放器的常规做法——
+     * 对 403 原地重试同一个地址毫无意义，换请求头才有用。
+     */
+    private var profileIndex = 0
+    private var profiles: List<NetProfile> = emptyList()
+
+    private data class NetProfile(val ua: String?, val referer: String?)
+
+    /** 起播时刻与首帧时刻：用来识别「有声音没画面 / 纯黑屏」这一类 VLC 才救得回的失败。 */
+    private var preparedAt = 0L
+    private var firstFrameAt = 0L
 
     /**
      * 当前解码方式。**可以随时改**：选择器每次起播都会重读这个值，
@@ -200,6 +223,19 @@ class PlayerController(
                 ) {
                     onDecoder(decoderName)
                 }
+
+                /**
+                 * 首帧真正上屏。这是「到底有没有画面」的唯一可信信号：
+                 * 有声音没画面、TS 解出音频却解不出视频时，播放状态一直是 READY，
+                 * 光看 buffering 判断不出来，只能靠这个回调。
+                 */
+                override fun onRenderedFirstFrame(
+                    eventTime: AnalyticsListener.EventTime,
+                    output: Any,
+                    renderTimeMs: Long,
+                ) {
+                    if (firstFrameAt == 0L) firstFrameAt = android.os.SystemClock.elapsedRealtime()
+                }
             })
         }
 
@@ -284,12 +320,50 @@ class PlayerController(
         }
     }
 
+    /** 从异常链里挖 HTTP 状态码（403 防盗链 / 404 源失效 / 429 限流，修法完全不同）。 */
+    private fun httpStatus(error: Throwable): Int? {
+        var cur: Throwable? = error
+        var guard = 0
+        while (cur != null && guard++ < 6) {
+            if (cur is HttpDataSource.InvalidResponseCodeException) return cur.responseCode
+            // 部分版本把它包在 IOException 里，message 形如 "Response code: 403"
+            val m = cur.message
+            if (m != null && m.contains("Response code:", true)) {
+                m.substringAfter("Response code:", "").trim().toIntOrNull()?.let { return it }
+            }
+            cur = cur.cause
+        }
+        return null
+    }
+
+    /**
+     * 这一路流可以用的请求头组合，按「频道自带 → 播放器 UA → 浏览器 UA + 站内 Referer」排。
+     * 站点根地址用作 Referer：绝大多数防盗链只校验来源域名，不校验完整路径。
+     */
+    private fun buildProfiles(ch: Channel): List<NetProfile> {
+        val origin = runCatching {
+            val u = java.net.URI(ch.url)
+            val port = if (u.port > 0) ":" + u.port else ""
+            "${u.scheme}://${u.host}$port/"
+        }.getOrNull()
+        return listOf(
+            NetProfile(ch.userAgent.ifBlank { null }, ch.referrer.ifBlank { null }),
+            NetProfile("VLC/3.0.21 LibVLC/3.0.21", origin),
+            NetProfile(
+                "Mozilla/5.0 (Linux; Android 9; TV) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                origin,
+            ),
+        )
+    }
+
     private fun onPlayerErrorInternal(error: PlaybackException) {
         val code = error.errorCodeName
         lastErrorCode = code
         healthyMs = 0L // 出错即中断连续播放，重新攒健康时长
         val msg = error.message ?: "播放失败"
         val ch = currentChannel
+        val status = httpStatus(error)
 
         // 音频解码器初始化失败：不要整体放弃，把音频轨关掉继续出画面。
         // 国内源大量用 AC3/EAC3，而盒子往往只有 AAC 解码器——一关音频就活了。
@@ -311,17 +385,80 @@ class PlayerController(
             return
         }
 
+        if (ch != null && status != null) {
+            // ① 401/403 防盗链：换请求头，而不是原地址重试
+            if (status == 401 || status == 403) {
+                if (profileIndex + 1 < profiles.size) {
+                    profileIndex++
+                    freshFirstFrame()
+                    onIssue(
+                        PlaybackIssue(
+                            code = code,
+                            message = "源要求防盗链校验，正在换一组请求头重试（第 $profileIndex 组）",
+                            stage = PlaybackIssue.Stage.RETRYING,
+                            attempt = profileIndex,
+                            http = status,
+                        ),
+                    )
+                    // 请求头换完立刻重开，不需要退避——被拒的是身份，不是网络
+                    mainHandler.postDelayed({ doPlay(ch) }, 250)
+                    return
+                }
+                giveUp(code, "HTTP $status 防盗链：三组请求头都被拒绝", ch, status,
+                    "这个源开了防盗链：换一个源；或把引擎切到 VLC 再试（VLC 的请求特征不同）")
+                return
+            }
+            // ② 404/410 源已失效：重试一万次也没用，直接说清楚
+            if (status == 404 || status == 410) {
+                giveUp(code, "HTTP $status：这个频道的地址已经失效", ch, status,
+                    "源提供者换了地址：刷新订阅（设置 → 刷新）或换一个源，别在这个台上耗时间")
+                return
+            }
+            // ③ 429 限流：等 3 秒给一次机会，还是不行就放弃
+            if (status == 429) {
+                if (retryAttempt < 1) {
+                    retryAttempt = 1
+                    onIssue(PlaybackIssue(code, "请求太频繁被限流（HTTP 429），3 秒后再试", PlaybackIssue.Stage.RETRYING, 1, http = status))
+                    mainHandler.postDelayed({ doPlay(ch) }, 3_000)
+                    return
+                }
+                giveUp(code, "HTTP 429：源站持续限流", ch, status, "这个源限制了访问频率：换源，或过几分钟再试")
+                return
+            }
+            // ④ 其它 4xx：地址/参数本身有问题，直接说清楚
+            if (status in 400..499) {
+                giveUp(code, "HTTP $status：服务端拒绝了这个请求", ch, status,
+                    "地址可能已失效或需要特殊参数：换一个源")
+                return
+            }
+        }
+
         if (ch == null || retryAttempt >= retryDelays.size) {
             // 3 次都失败：不再静默重试，把错误码和处置建议交给 UI 常驻显示
-            onIssue(PlaybackIssue(code, msg, PlaybackIssue.Stage.GAVE_UP, retryAttempt, buildHint(code)))
+            onIssue(PlaybackIssue(code, msg, PlaybackIssue.Stage.GAVE_UP, retryAttempt, buildHint(code), status))
             onError(code + " / " + msg)
             return
         }
         retryAttempt++
         val wait = retryDelays[retryAttempt - 1]
-        onIssue(PlaybackIssue(code, msg, PlaybackIssue.Stage.RETRYING, retryAttempt))
+        onIssue(PlaybackIssue(code, msg, PlaybackIssue.Stage.RETRYING, retryAttempt, http = status))
         // 必须在主线程重开；Handler 回调默认就在主线程
         mainHandler.postDelayed({ restart(ch, resetRetry = false) }, wait)
+    }
+
+    /** 统一走「放弃」：把错误码、HTTP 码、处置建议一次给全。 */
+    private fun giveUp(code: String, message: String, ch: Channel?, http: Int?, hint: String) {
+        onIssue(
+            PlaybackIssue(
+                code = code,
+                message = message,
+                stage = PlaybackIssue.Stage.GAVE_UP,
+                attempt = retryAttempt,
+                hint = hint,
+                http = http,
+            ),
+        )
+        onError(code + " / " + message)
     }
 
     /** 从异常链里挖出「哪个 mime 的解码器起不来」，挖不到返回 null。 */
@@ -362,6 +499,8 @@ class PlayerController(
     private fun checkStall() {
         val ch = currentChannel ?: return
         if (!player.playWhenReady || player.playbackState != Player.STATE_BUFFERING) {
+            // 不在缓冲态时，单独看「是不是根本没出过画面」
+            detectBlackScreen()
             resetStall()
             return
         }
@@ -376,6 +515,7 @@ class PlayerController(
                 retryAttempt = 0
                 healthyMs = 0L
             }
+            detectBlackScreen()
             return
         }
         stallMs += SAMPLE_INTERVAL_MS
@@ -395,6 +535,42 @@ class PlayerController(
         }
     }
 
+    /**
+     * 黑屏专项：起播 10 秒还没出过一帧，判定「解码器吐不出画面」。
+     *
+     * 这一类失败 ExoPlayer 不会报错——状态是 READY、声音可能有、就是黑着。
+     * 老盒子（国科微 GK6323 / OMX 硬解）解 1080i 或高 profile H.264 时最典型。
+     * 判成 GAVE_UP 后 AUTO 模式会自动切到 VLC，这才是真正能救回来的那一步。
+     */
+    private fun detectBlackScreen() {
+        val ch = currentChannel ?: return
+        if (!player.playWhenReady) return   // 暂停中不算黑屏
+        if (firstFrameAt != 0L) return
+        if (preparedAt == 0L) return
+        if (player.playbackState != Player.STATE_READY &&
+            player.playbackState != Player.STATE_BUFFERING
+        ) return
+        val waited = android.os.SystemClock.elapsedRealtime() - preparedAt
+        if (waited < BLACK_LIMIT_MS) return
+        // 只报一次：把 preparedAt 清掉当哨兵，避免每 3 秒刷一遍
+        preparedAt = 0L
+        onIssue(
+            PlaybackIssue(
+                code = "NO_FIRST_FRAME_10S",
+                message = "起播 10 秒没有出画面（黑屏）",
+                stage = PlaybackIssue.Stage.GAVE_UP,
+                attempt = retryAttempt,
+                hint = "多半是硬解解不动这个码流：把播放引擎切到 VLC，或把解码方式改成软解",
+            ),
+        )
+    }
+
+    /** 换请求头重开时把首帧计时重新算，别让上一组的黑屏判定误伤这一组。 */
+    private fun freshFirstFrame() {
+        firstFrameAt = 0L
+        preparedAt = android.os.SystemClock.elapsedRealtime()
+    }
+
     private fun resetStall() {
         lastPosition = -1L
         stallMs = 0L
@@ -412,6 +588,9 @@ class PlayerController(
         // 换台必须把「静音保画面」的开关放回去：上一个台的 AC3 关过音频，
         // 不还原的话下一个 AAC 的台也会没声音。
         audioBypassed = false
+        // 请求头档位也归零：新频道从它自己的 UA/Referer 开始试
+        profileIndex = 0
+        profiles = emptyList()
         resetStall()
         doPlay(channel)
     }
@@ -420,12 +599,20 @@ class PlayerController(
         currentChannel = channel
         // 每次起播都重新下发轨道约束（含音频轨开关状态）
         applyTrackParams()
-        // 从 error 状态恢复必须换新的 MediaSource，不能只调 play()
+        // 首帧计时：10 秒没画面就判黑屏（见 detectBlackScreen）
+        preparedAt = android.os.SystemClock.elapsedRealtime()
+        firstFrameAt = 0L
+
+        // 请求头档位：0 = 频道自带，1/2 = 防盗链兜底
+        if (profiles.isEmpty() || profileIndex == 0) profiles = buildProfiles(channel)
+        val prof = profiles.getOrElse(profileIndex) { profiles.last() }
         val factory = OkHttpDataSource.Factory(Network.client)
-            .setUserAgent(channel.userAgent.ifBlank { defaultAgent })
-        if (channel.referrer.isNotBlank()) {
-            factory.setDefaultRequestProperties(mapOf("Referer" to channel.referrer))
-        }
+            .setUserAgent(prof.ua ?: channel.userAgent.ifBlank { defaultAgent })
+        val referer = prof.referer ?: channel.referrer.ifBlank { null }
+        // 一次给全：setDefaultRequestProperties 是「整表替换」，分两次调用会把 Referer 冲掉
+        val headers = mutableMapOf("Cache-Control" to "no-cache")
+        if (referer != null) headers["Referer"] = referer
+        factory.setDefaultRequestProperties(headers)
         val item = MediaItem.Builder()
             .setUri(channel.url)
             .setMediaId(channel.id)
@@ -458,6 +645,9 @@ class PlayerController(
         val ch = channel ?: return
         // 用户手动「再试一次」也是全新一轮：把静音兜底还原，重新给音频一次机会
         audioBypassed = false
+        // 请求头也从头试：上次可能是网络抖动，不代表这个 UA 一定不行
+        profileIndex = 0
+        profiles = emptyList()
         restart(ch, resetRetry = true)
     }
 
@@ -495,5 +685,7 @@ class PlayerController(
         const val SAMPLE_INTERVAL_MS = 3_000L
         const val STALL_LIMIT_MS = 15_000L
         const val HEALTHY_RESET_MS = 20_000L
+        /** 起播后多久还没有首帧就判黑屏。10 秒足够慢速源起播，又不会让用户干等。 */
+        const val BLACK_LIMIT_MS = 10_000L
     }
 }

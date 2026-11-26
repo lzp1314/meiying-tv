@@ -197,6 +197,25 @@ fun PlayerScreen(
     var usingVlc by remember { mutableStateOf(false) }
     var playEngine by remember { mutableStateOf(repo.prefs.playEngine) }
 
+    /**
+     * VLC 初始化/挂载失败的完整原因。0.5.0 只有一句「初始化失败」，
+     * 分不清是原生库加载不了、还是画面组件挂不上——那两种修法完全不同。
+     * 现在把它显示在设置页诊断行里，用户截个图就能定位。
+     */
+    var vlcDiag by remember { mutableStateOf("") }
+
+    /**
+     * 国科微 GK6323（华为/中兴/烽火那批运营商盒子）的 OMX 硬解对 1080i、高 profile H.264
+     * 有已知兼容问题，典型表现是「出几秒→黑屏」或直接解不出来。
+     * 这类机器上 AUTO 直接优先 VLC，比让用户在两个引擎之间摸要省事。
+     */
+    val preferVlcOnThisChip = remember {
+        val marks = listOf(
+            android.os.Build.HARDWARE, android.os.Build.BOARD, android.os.Build.DEVICE,
+        ).joinToString(" ").lowercase()
+        marks.contains("goke") || marks.contains("gk6323") || marks.contains("hikari")
+    }
+
     DisposableEffect(Unit) {
         onDispose {
             Warmer.schedule(null)
@@ -395,12 +414,24 @@ fun PlayerScreen(
         if (vlc) {
             // VLC 初始化可能失败（个别机型的 ABI 或系统库不匹配）。
             // 失败就老老实实退回 ExoPlayer——宁可少一个引擎，也不能让本来能播的台变黑屏。
-            val engine = runCatching { ensureVlc() }.getOrNull()
+            val built = runCatching { ensureVlc() }
+            val engine = built.getOrNull()
             if (engine == null) {
-                toast = "VLC 引擎初始化失败，仍用 ExoPlayer"
+                // 0.5.0 只吐一句「初始化失败」，异常被 getOrNull() 吞掉，线上无从定位。
+                // 0.5.1 起把真实原因（异常类名 + message + cause）显示出来并存进诊断行。
+                val t = built.exceptionOrNull()
+                vlcDiag = t?.let { e ->
+                    buildString {
+                        append(e.javaClass.simpleName)
+                        e.message?.takeIf { it.isNotBlank() }?.let { append(": ").append(it) }
+                    }
+                }?.ifBlank { null } ?: "构造 VlcEngine 时抛出异常（无 message）"
+                toast = "VLC 引擎初始化失败，仍用 ExoPlayer（详见设置页诊断）"
                 startEngine(false, ch)
                 return
             }
+            // 引擎对象建好了，但 native 层可能仍然没起来（buildEngine 全部失败时 initError 非空）
+            if (engine.initError.isNotBlank()) vlcDiag = engine.initError
             controller.stop()
             usingVlc = true
             // ExoPlayer 的编码/解码器诊断对 VLC 不成立，留着只会误导排查
@@ -468,11 +499,16 @@ fun PlayerScreen(
         // 换台提示：电视上原来换完台屏幕没有任何反馈，不知道切到第几台了
         osd = ChannelOsd(if (idx >= 0) idx + 1 else 0, ch)
 
-        // 引擎选择：强制 VLC；或 AUTO 模式下这个台以前在 ExoPlayer 上失败过，直接走 VLC
+        // 引擎选择：强制 VLC；或 AUTO 模式下这个台以前在 ExoPlayer 上失败过，直接走 VLC；
+        // 或这台机器是国科微硬解（解 1080i 有先天缺陷），AUTO 也优先 VLC
         val pref = repo.prefs.playEngine
         val knownBad = sourceId != null &&
             repo.prefs.channelKey(ch) in repo.prefs.vlcOnlyChannels(sourceId)
-        startEngine(pref == PlayEngine.VLC || (pref == PlayEngine.AUTO && knownBad), ch)
+        startEngine(
+            pref == PlayEngine.VLC ||
+                (pref == PlayEngine.AUTO && (knownBad || preferVlcOnThisChip)),
+            ch,
+        )
 
         // P3 预热：只预热同一分组内的下一个台。跨分组说明用户在跳组，不猜。
         // 3 秒去抖和失败静默都在 Warmer 里；这里算错了也只是少命中一次，不影响播放。
@@ -1026,7 +1062,8 @@ fun PlayerScreen(
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
-                        "${fatal.kind}问题：${fatal.code}",
+                        // 带上 HTTP 码：403 和 404 的处置完全不同，用户看一眼就知道是该换源还是刷新
+                        "${fatal.kind}问题：${fatal.codeText}",
                         color = Color.White,
                         fontSize = if (isTv) 16.sp else 13.sp,
                         modifier = Modifier.padding(top = 8.dp),
@@ -1154,6 +1191,7 @@ fun PlayerScreen(
                 decoder = decoderName,
                 errorCode = errorCode,
                 mediaInfo = mediaInfo,
+                vlcDiag = vlcDiag,
                 decodeMode = decodeMode,
                 onDecodeMode = { setDecodeMode(it) },
                 playEngine = playEngine,

@@ -125,6 +125,7 @@ internal fun LobbyPanel(
     decoder: String,
     errorCode: String = "",
     mediaInfo: String = "",
+    vlcDiag: String = "",
     decodeMode: DecodeMode,
     onDecodeMode: (DecodeMode) -> Unit,
     playEngine: PlayEngine,
@@ -194,6 +195,7 @@ internal fun LobbyPanel(
                         decoder = decoder,
                         errorCode = errorCode,
                         mediaInfo = mediaInfo,
+                        vlcDiag = vlcDiag,
                         decodeMode = decodeMode,
                         onDecodeMode = onDecodeMode,
                         playEngine = playEngine,
@@ -253,8 +255,17 @@ private fun NavRail(
                 upRequester = focusRequests[(i - 1 + LobbyTab.entries.size) % LobbyTab.entries.size],
                 downRequester = focusRequests[(i + 1) % LobbyTab.entries.size],
                 // 焦点一到就切页：遥控器上下移到「信号源」，右边内容立刻跟着换，
-                // 不再需要按 OK 确认。这是切页的唯一真相源，没有第二套机制抢焦点。
+                // 不再需要按 OK 确认。这是切页的第一真相源，没有第二套机制抢焦点。
                 onFocused = { if (isTv) onTab(t) },
+                // 第二真相源：上下键在导航项上自己吞掉并换页。
+                // 真机上焦点链一旦错位，onFocusChanged 就哑火（高亮会动、页面不换），
+                // 这条按键直通路径不依赖焦点系统，两个都通才敢说「按到就切」。
+                onNavStep = { delta ->
+                    val n = ((i + delta) % LobbyTab.entries.size + LobbyTab.entries.size) %
+                        LobbyTab.entries.size
+                    onTab(LobbyTab.entries[n])
+                    runCatching { focusRequests[n].requestFocus() }
+                },
                 onClick = { onTab(t) },
             )
             Spacer(Modifier.height(if (isTv) 6.dp else 4.dp))
@@ -286,9 +297,12 @@ private fun NavItem(
     upRequester: FocusRequester? = null,
     downRequester: FocusRequester? = null,
     onFocused: () -> Unit,
+    onNavStep: (Int) -> Unit = {},
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
+    // 选中态跟着「当前页」走，焦点态只负责描边。
+    // 以前高亮由焦点决定，焦点一旦没落到导航项上，就会出现「页面没换、高亮却在跳」的错觉。
     val bg = when {
         focused -> NavFocusBg
         selected -> NavSelectedBg
@@ -304,16 +318,30 @@ private fun NavItem(
             .height(if (isTv) 54.dp else 46.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(bg)
-            // 焦点一到就切页 —— 这是「按到信号源就出信号源页」的唯一驱动源。
+            // 顺序很关键：focusRequester / focusProperties 必须在真正的焦点目标之前，
+            // onFocusChanged 也要在它之前才能观察到它。
+            //
+            // 旧写法是 .focusable() + .clickable{} 叠了两个焦点节点，
+            // focusProperties 又落在 clickable 那个节点上——DPAD 焦点进了 clickable，
+            // onFocusChanged 监听的却是 focusable，于是「高亮不亮、页面不换」。
+            // 现在只留 clickable 一个焦点节点，其余全部排在它前面。
+            .focusRequester(focusRequester)
+            .focusProperties {
+                if (upRequester != null) up = upRequester
+                if (downRequester != null) down = downRequester
+            }
             .onFocusChanged {
                 focused = it.isFocused
                 if (it.isFocused) onFocused()
             }
-            .focusRequester(focusRequester)
-            .then(if (isTv) Modifier.focusable() else Modifier)
-            .focusProperties {
-                if (upRequester != null) up = upRequester
-                if (downRequester != null) down = downRequester
+            // 上下键自己处理：不把换页寄托在焦点系统的自动导航上
+            .onKeyEvent { e ->
+                if (!isTv || e.type != KeyEventType.KeyDown) return@onKeyEvent false
+                when (e.key) {
+                    Key.DirectionUp -> { onNavStep(-1); true }
+                    Key.DirectionDown -> { onNavStep(1); true }
+                    else -> false
+                }
             }
             .clickable { onClick() }
             .padding(horizontal = if (isTv) 16.dp else 10.dp),
@@ -857,6 +885,7 @@ private fun SettingsPage(
     decoder: String,
     errorCode: String = "",
     mediaInfo: String = "",
+    vlcDiag: String = "",
     decodeMode: DecodeMode,
     onDecodeMode: (DecodeMode) -> Unit,
     playEngine: PlayEngine,
@@ -993,6 +1022,17 @@ private fun SettingsPage(
                     "最近错误：$errorCode（${if (decoderIssue) "解码器" else "多为网络/源"}）",
                     color = Color(0xFFFCA5A5),
                     fontSize = 12.sp,
+                )
+            }
+        }
+        // VLC 引擎自身的问题常驻：初始化/挂载失败时，这里给出真正的异常类名和 message。
+        // 没有这一行，用户只能看到「引擎初始化失败」六个字，谁也没法定位。
+        if (vlcDiag.isNotBlank()) {
+            item {
+                Text(
+                    "VLC 引擎：$vlcDiag",
+                    color = Color(0xFFFCA5A5),
+                    fontSize = 11.sp,
                 )
             }
         }

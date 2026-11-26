@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import com.lik.iptvplayer.core.Channel
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
@@ -20,6 +21,14 @@ import org.videolan.libvlc.util.VLCVideoLayout
  *
  * 内存代价：libVLC 常驻约 30-60MB，所以在 [com.lik.iptvplayer.core.PlayEngine.AUTO]
  * 模式下**按需创建**——只有真遇到播不了的台才初始化，正常看台不占这份内存。
+ *
+ * ⚠️ 顺序问题（0.5.0 的坑，0.5.1 修）：
+ * `MediaPlayer.attachViews()` 要求 [VLCVideoLayout] **已经挂在窗口上**，
+ * 也就是它得先被加进界面、拿到有效的 SurfaceHolder。0.5.0 在构造函数里就
+ * attach，此时视图还在 Composable 外面，attach 直接抛异常，被上层
+ * `runCatching` 吞掉，表现就是「VLC 引擎初始化失败，仍用 ExoPlayer」——
+ * 于是 VLC 这条兜底从头到尾没生效过。
+ * 现在改成：构造函数只建引擎，attach 由视图真正进窗口时触发。
  */
 class VlcEngine(context: Context) {
 
@@ -29,25 +38,19 @@ class VlcEngine(context: Context) {
     /** 真正出画面了（首次 Vout），用来收掉起播超时看门狗。 */
     var onStarted: () -> Unit = { }
 
+    /**
+     * 初始化失败的原因（空串=成功）。
+     * 0.5.0 把异常吞成一句「初始化失败」，线上完全没法定位；
+     * 这里保留「异常类名 + message + 底层 cause」，并显示到设置页诊断行。
+     */
+    var initError: String = ""
+        private set
+
     private val appContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    private val libVlc = LibVLC(
-        appContext,
-        listOf(
-            // 硬解优先，硬解不成就自动回落软解——老盒子软解 1080p 会掉帧，
-            // 但只要硬解能走就不要走软解。
-            "--avcodec-hw=any",
-            // 直播缓冲 1.5 秒：太小抗不住抖动，太大换台迟钝。VLC 自己的默认偏保守。
-            "--network-caching=1500",
-            "--live-caching=1500",
-            "--no-sub-autodetect-file",
-            // 不设 --no-drop-late-frames：直播必须允许丢晚到的帧，
-            // 否则解码跟不上时延迟会越积越大，越看越偏
-        ),
-    )
-
-    val mediaPlayer = MediaPlayer(libVlc)
+    private var libVlc: LibVLC? = null
+    private var mediaPlayer: MediaPlayer? = null
 
     /** 给 Compose 挂载的画面视图。整个生命周期只有一个实例，不换父容器。 */
     val view = VLCVideoLayout(appContext).apply {
@@ -55,26 +58,117 @@ class VlcEngine(context: Context) {
         isFocusable = false
     }
 
+    private var viewsAttached = false
     private var startWatchdog: Runnable? = null
 
-    /** 画面视图有没有成功挂上。挂不上就等于没有出画面的通道，必须明说而不是黑屏干等。 */
-    private var viewAttached = false
+    /** 视图还没挂上时先存着，等 attach 完成后自动起播，不让用户再按一次。 */
+    private var pending: Channel? = null
 
     init {
-        // 第三个参数是「显示字幕」，第四个是「用 TextureView」。
-        // 电视端用 SurfaceView（false）：硬解直出、开销更低，老盒子更稳。
-        viewAttached = runCatching { mediaPlayer.attachViews(view, null, false, false) }.isSuccess
-        mediaPlayer.volume = 100
-        mediaPlayer.setEventListener { event ->
-            when (event.type) {
-                MediaPlayer.Event.Playing -> cancelWatchdog()
-                MediaPlayer.Event.Vout -> {
-                    cancelWatchdog()
-                    onStarted()
+        buildEngine()
+        // 视图进窗口的那一刻才 attach——这才是 VLC 要求的时机
+        view.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {
+                if (attachViewsIfPossible()) {
+                    pending?.let { ch ->
+                        pending = null
+                        playNow(ch)
+                    }
                 }
-                MediaPlayer.Event.EncounteredError ->
-                    onError("VLC 无法解码该码流（编码或地址不受支持）")
             }
+
+            override fun onViewDetachedFromWindow(v: View) = Unit
+        })
+    }
+
+    /**
+     * 建引擎。两套参数依次尝试：
+     * 1. 完整参数（硬解优先 + 1.5 秒缓冲）；
+     * 2. 空参数——个别老固件上某个 option 会让 VLC 直接拒绝启动，
+     *    这时用出厂默认值反而能起来。
+     */
+    private fun buildEngine() {
+        // 先单独探一次原生库：失败就是 ABI/安装包问题，跟参数无关，要分开报
+        val soError = runCatching { System.loadLibrary("vlcjni") }.exceptionOrNull()
+
+        val attempts = listOf(
+            listOf(
+                "--avcodec-hw=any",
+                "--network-caching=1500",
+                "--live-caching=1500",
+                "--no-sub-autodetect-file",
+            ),
+            emptyList(),
+        )
+        var last: Throwable? = null
+        for (opts in attempts) {
+            try {
+                val vlc = LibVLC(appContext, opts)
+                val mp = MediaPlayer(vlc)
+                mp.volume = 100
+                mp.setEventListener { event ->
+                    when (event.type) {
+                        MediaPlayer.Event.Playing -> cancelWatchdog()
+                        MediaPlayer.Event.Vout -> {
+                            cancelWatchdog()
+                            onStarted()
+                        }
+                        MediaPlayer.Event.EncounteredError ->
+                            onError("VLC 无法解码该码流（编码或地址不受支持）")
+                    }
+                }
+                libVlc = vlc
+                mediaPlayer = mp
+                initError = ""
+                return
+            } catch (t: Throwable) {
+                last = t
+            }
+        }
+        initError = buildString {
+            append(describe(last))
+            if (soError != null) {
+                append(" · 原生库加载失败：")
+                append(describe(soError))
+                append("（当前 ABI：")
+                append(android.os.Build.SUPPORTED_ABIS.joinToString(","))
+                append("）")
+            }
+        }
+    }
+
+    /** 把异常翻成「类名: message ← cause」，一路挖到底，别只留第一层。 */
+    private fun describe(t: Throwable?): String {
+        if (t == null) return "未知错误"
+        val sb = StringBuilder()
+        var cur: Throwable? = t
+        var guard = 0
+        while (cur != null && guard++ < 4) {
+            if (guard > 1) sb.append(" ← ")
+            sb.append(cur.javaClass.simpleName)
+            cur.message?.takeIf { it.isNotBlank() }?.let { sb.append(": ").append(it.take(160)) }
+            cur = cur.cause
+        }
+        return sb.toString()
+    }
+
+    /**
+     * 视图在窗口上就 attach。返回是否已 attach。
+     * 老固件上 SurfaceHolder 偶尔要等一帧才就绪，所以失败时允许调用方稍后重试。
+     */
+    private fun attachViewsIfPossible(): Boolean {
+        val mp = mediaPlayer ?: return false
+        if (viewsAttached) return true
+        if (!view.isAttachedToWindow) return false
+        return runCatching {
+            // 第三个参数「显示字幕」= false，第四个「用 TextureView」= false：
+            // 电视端用 SurfaceView 硬解直出，开销更低，老盒子更稳
+            mp.attachViews(view, null, false, false)
+            viewsAttached = true
+            true
+        }.getOrElse { t ->
+            initError = "画面组件挂载失败：" + describe(t)
+            false
         }
     }
 
@@ -85,12 +179,41 @@ class VlcEngine(context: Context) {
      * 拿着上一条流的解码参数，表现为「换了台还是黑屏」。
      */
     fun play(channel: Channel) {
-        if (!viewAttached) {
-            // 视图没挂上时 play() 只会安静地什么都不显示，提前失败更好排查
-            onError("VLC 画面组件挂载失败（attachViews），该机型无法使用 VLC 引擎")
+        if (mediaPlayer == null) {
+            onError("VLC 引擎未就绪：" + initError.ifBlank { "初始化失败" })
             return
         }
-        val media = Media(libVlc, Uri.parse(channel.url)).apply {
+        if (!attachViewsIfPossible()) {
+            // 视图可能还没进窗口（Compose 首帧），先记下来，attach 后自动续播；
+            // 同时给一个短看门狗，真挂不上要明说，不能黑屏干等
+            pending = channel
+            awaitAttach(retries = 12)
+            return
+        }
+        playNow(channel)
+    }
+
+    /** 视图进窗口通常在一两帧内，最多等约 1.2 秒；等不到就报错。 */
+    private fun awaitAttach(retries: Int) {
+        if (attachViewsIfPossible()) {
+            pending?.let { ch ->
+                pending = null
+                playNow(ch)
+            }
+            return
+        }
+        if (retries <= 0) {
+            pending = null
+            onError("VLC 画面组件挂载失败：" + initError.ifBlank { "视图未进入窗口" })
+            return
+        }
+        mainHandler.postDelayed({ awaitAttach(retries - 1) }, 100)
+    }
+
+    private fun playNow(channel: Channel) {
+        val vlc = libVlc ?: return
+        val mp = mediaPlayer ?: return
+        val media = Media(vlc, Uri.parse(channel.url)).apply {
             // 第二参数 false = 不强制硬解，允许失败后回落软解
             setHWDecoderEnabled(true, false)
             // #EXTVLCOPT 里解析出来的 UA / Referer，很多源靠这个过防盗链
@@ -100,10 +223,10 @@ class VlcEngine(context: Context) {
             addOption(":live-caching=1500")
         }
         runCatching {
-            mediaPlayer.setMedia(media)
+            mp.setMedia(media)
             media.release()
-            mediaPlayer.play()
-        }.onFailure { onError("VLC 起播异常：${it.message ?: it.javaClass.simpleName}") }
+            mp.play()
+        }.onFailure { onError("VLC 起播异常：" + describe(it)) }
 
         armWatchdog()
     }
@@ -128,25 +251,30 @@ class VlcEngine(context: Context) {
 
     fun pause() {
         cancelWatchdog()
-        runCatching { mediaPlayer.pause() }
+        runCatching { mediaPlayer?.pause() }
     }
 
     fun resume() {
-        runCatching { mediaPlayer.play() }
+        runCatching { mediaPlayer?.play() }
     }
 
     fun stop() {
         cancelWatchdog()
-        runCatching { mediaPlayer.stop() }
+        pending = null
+        runCatching { mediaPlayer?.stop() }
     }
 
     /** 引擎不再需要时调用：detach 视图再释放原生资源，顺序反了会崩在 native 层。 */
     fun release() {
         cancelWatchdog()
-        runCatching { mediaPlayer.setEventListener(null) }
-        runCatching { mediaPlayer.stop() }
-        runCatching { mediaPlayer.detachViews() }
-        runCatching { mediaPlayer.release() }
-        runCatching { libVlc.release() }
+        pending = null
+        runCatching { mediaPlayer?.setEventListener(null) }
+        runCatching { mediaPlayer?.stop() }
+        if (viewsAttached) runCatching { mediaPlayer?.detachViews() }
+        viewsAttached = false
+        runCatching { mediaPlayer?.release() }
+        runCatching { libVlc?.release() }
+        mediaPlayer = null
+        libVlc = null
     }
 }

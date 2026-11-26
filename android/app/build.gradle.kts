@@ -15,8 +15,8 @@ android {
         targetSdk = 36
         // 覆盖安装（升级）必须递增 versionCode；包名与签名不变时
         // SharedPreferences（源列表、锁定、上次频道）会自动保留
-        versionCode = 26
-        versionName = "0.5.0"
+        versionCode = 27
+        versionName = "0.5.1"
 
         ndk {
             // libVLC 每个 ABI 的 .so 就有 38–50MB，四种全带会让 APK 破百兆。
