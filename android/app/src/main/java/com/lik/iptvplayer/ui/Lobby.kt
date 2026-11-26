@@ -70,6 +70,7 @@ import com.lik.iptvplayer.core.DecodeMode
 import com.lik.iptvplayer.core.Diag
 import com.lik.iptvplayer.core.LogoLoader
 import com.lik.iptvplayer.core.PairInfo
+import com.lik.iptvplayer.core.PlayEngine
 import com.lik.iptvplayer.core.QrEncoder
 import com.lik.iptvplayer.core.Source
 import kotlinx.coroutines.delay
@@ -123,8 +124,11 @@ internal fun LobbyPanel(
     onRefresh: () -> Unit,
     decoder: String,
     errorCode: String = "",
+    mediaInfo: String = "",
     decodeMode: DecodeMode,
     onDecodeMode: (DecodeMode) -> Unit,
+    playEngine: PlayEngine,
+    onPlayEngine: (PlayEngine) -> Unit,
     keyUpNext: Boolean,
     onKeyUpNext: (Boolean) -> Unit,
     updateUrl: String,
@@ -189,8 +193,11 @@ internal fun LobbyPanel(
                         lockedId = lockedId,
                         decoder = decoder,
                         errorCode = errorCode,
+                        mediaInfo = mediaInfo,
                         decodeMode = decodeMode,
                         onDecodeMode = onDecodeMode,
+                        playEngine = playEngine,
+                        onPlayEngine = onPlayEngine,
                         keyUpNext = keyUpNext,
                         onKeyUpNext = onKeyUpNext,
                         onRefresh = onRefresh,
@@ -849,8 +856,11 @@ private fun SettingsPage(
     lockedId: String?,
     decoder: String,
     errorCode: String = "",
+    mediaInfo: String = "",
     decodeMode: DecodeMode,
     onDecodeMode: (DecodeMode) -> Unit,
+    playEngine: PlayEngine,
+    onPlayEngine: (PlayEngine) -> Unit,
     keyUpNext: Boolean,
     onKeyUpNext: (Boolean) -> Unit,
     onRefresh: () -> Unit,
@@ -926,6 +936,26 @@ private fun SettingsPage(
                 }
             }
         }
+        // 播放引擎：ExoPlayer 播不了的台（MPEG-2 / AC3 / 非标准 TS）换 VLC 就能播
+        item {
+            LabeledRow("播放引擎") {
+                PlayEngine.entries.forEach { e ->
+                    ModeChip(e.label, e == playEngine, isTv = isTv) { onPlayEngine(e) }
+                }
+            }
+        }
+        item {
+            Text(
+                when (playEngine) {
+                    PlayEngine.AUTO -> "自动：先用 ExoPlayer，某个台连试 3 次失败就自动改用 VLC，并记住这个台。"
+                    PlayEngine.EXO -> "ExoPlayer：启动快、省内存，但播不了 MPEG-2 视频和 AC3 音频的老源。"
+                    PlayEngine.VLC -> "VLC：兼容性最强，几乎所有源都能播；内存占用更高，老盒子可能略卡。"
+                },
+                color = Color(0xFF64748B),
+                fontSize = 12.sp,
+                modifier = Modifier.fillMaxWidth(0.96f),
+            )
+        }
         item {
             LabeledRow("换台键") {
                 ModeChip("上 = 下一台", keyUpNext, isTv = isTv) { onKeyUpNext(true) }
@@ -934,6 +964,17 @@ private fun SettingsPage(
         }
         // 解码信息 / 错误码只在诊断时看，不单独占焦点位——纯文字跟随相邻项滚动即可。
         // 焦点点越少，遥控器上下翻页越顺，不会被「只看不按」的诊断文字打断。
+        // 这一行是排查「黑屏 / 卡住 / 报错」的关键：三种现象用户听起来一样，
+        // 但视频/音频编码不同，处理方式完全不同（MPEG-2 和 AC3 都只能走 VLC）。
+        if (mediaInfo.isNotBlank()) {
+            item {
+                Text(
+                    "当前编码：$mediaInfo",
+                    color = Color(0xFF93C5FD),
+                    fontSize = 12.sp,
+                )
+            }
+        }
         if (decoder.isNotBlank()) {
             item {
                 val soft = decoder.startsWith("c2.android.") || decoder.startsWith("OMX.google.")

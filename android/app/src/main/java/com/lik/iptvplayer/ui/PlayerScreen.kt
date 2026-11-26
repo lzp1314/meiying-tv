@@ -7,6 +7,7 @@ import android.graphics.Bitmap
 import android.media.AudioManager
 import android.provider.Settings
 import android.view.KeyEvent
+import android.view.View
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
 import androidx.lifecycle.Lifecycle
@@ -93,12 +94,14 @@ import com.lik.iptvplayer.core.Diag
 import com.lik.iptvplayer.core.LogoLoader
 import com.lik.iptvplayer.core.PairInfo
 import com.lik.iptvplayer.core.PairingServer
+import com.lik.iptvplayer.core.PlayEngine
 import com.lik.iptvplayer.core.QrEncoder
 import com.lik.iptvplayer.core.RefreshResult
 import com.lik.iptvplayer.core.Source
 import com.lik.iptvplayer.core.SourceRepository
 import com.lik.iptvplayer.player.PlaybackIssue
 import com.lik.iptvplayer.player.PlayerController
+import com.lik.iptvplayer.player.VlcEngine
 import com.lik.iptvplayer.player.Warmer
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -109,6 +112,17 @@ import kotlin.math.roundToInt
 /** Activity 与 Compose 之间的按键桥：在 dispatchKeyEvent 里先拦，避免和焦点系统抢事件。 */
 class KeyBridge {
     var onKey: ((Int) -> Boolean)? = null
+}
+
+/**
+ * libVLC 引擎的惰性持有器。
+ *
+ * 刻意用普通可变字段而不是 Compose State：引擎只在按键回调、播放回调里读写，
+ * 写 State 会在组合期间触发重组告警；它也不需要驱动界面刷新——
+ * 界面关心的是「这一轮走不走 VLC」，那是另一份 boolean 状态。
+ */
+internal class VlcHolder {
+    var engine: VlcEngine? = null
 }
 
 internal enum class Panel { Lobby }
@@ -176,7 +190,21 @@ fun PlayerScreen(
             descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         }
     }
-    DisposableEffect(Unit) { onDispose { Warmer.schedule(null); controller.release() } }
+    // libVLC 引擎（第二引擎）：只在真遇到 ExoPlayer 播不了的台时才创建，
+    // 平时不初始化——它常驻内存 30–60MB，老盒子承受不起白占。
+    val vlcHolder = remember { VlcHolder() }
+    // 这一轮播放实际走的引擎。true = VLC 画面在上、ExoPlayer 视图隐藏。
+    var usingVlc by remember { mutableStateOf(false) }
+    var playEngine by remember { mutableStateOf(repo.prefs.playEngine) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            Warmer.schedule(null)
+            vlcHolder.engine?.release()
+            vlcHolder.engine = null
+            controller.release()
+        }
+    }
 
     // 暂停状态：OK / 双击 / 退后台都会改它；换台时重置为播放
     var paused by remember { mutableStateOf(false) }
@@ -190,6 +218,7 @@ fun PlayerScreen(
             if (event == Lifecycle.Event.ON_STOP) {
                 Warmer.schedule(null)   // 退后台：别在用户看不见时发预热请求
                 controller.pause()
+                vlcHolder.engine?.pause()
                 paused = true
             }
         }
@@ -200,7 +229,13 @@ fun PlayerScreen(
     // 实际启用的解码器。老盒子上「画面一顿一顿」多半是走了软解，
     // 把名字显示在设置里就能直接判定，不用连 adb 看日志。
     var decoderName by remember { mutableStateOf("") }
-    SideEffect { controller.onDecoder = { name -> decoderName = name } }
+    // 当前流的编码摘要（H.264 1280×720 · AC3）。黑屏/卡住/报错时用户报的现象都一样，
+    // 只有这一行能区分到底是哪类解码问题。
+    var mediaInfo by remember { mutableStateOf("") }
+    SideEffect {
+        controller.onDecoder = { name -> decoderName = name }
+        controller.onTracks = { info -> mediaInfo = info }
+    }
 
     // toast 要先于下面的错误回调定义：回调里要写它
     var toast by remember { mutableStateOf<String?>(null) }
@@ -208,19 +243,6 @@ fun PlayerScreen(
     // 播放异常状态：重试中给轻提示，3 次失败后常驻屏幕；错误码始终保留供 OSD/设置显示
     var fatalError by remember { mutableStateOf<PlaybackIssue?>(null) }
     var errorCode by remember { mutableStateOf("") }
-    SideEffect {
-        controller.onIssue = { ev ->
-            errorCode = ev.code
-            when (ev.stage) {
-                PlaybackIssue.Stage.RETRYING ->
-                    toast = "${ev.kind}问题 · ${ev.code}，${ev.attempt}/3 次后重连"
-                PlaybackIssue.Stage.STALL_RECOVER ->
-                    toast = "卡顿 15 秒 · 自动重连中"
-                PlaybackIssue.Stage.GAVE_UP ->
-                    fatalError = ev
-            }
-        }
-    }
 
     // 进应用即全屏：手机端同时锁横屏，TV 端只隐藏系统栏
     FullscreenEffect(enabled = true, landscape = !isTv)
@@ -241,6 +263,8 @@ fun PlayerScreen(
     var message by remember { mutableStateOf("") }
     // 换台提示：电视上换台完全看不到当前是第几台、也没有台标，这里补上
     var osd by remember { mutableStateOf<ChannelOsd?>(null) }
+    // 数字键缓冲：连续按的几位数字攒在这里，1.6 秒没新输入就跳台
+    var digitBuf by remember { mutableStateOf("") }
     var osdLogo by remember { mutableStateOf<Pair<String, Bitmap>?>(null) }
     // 遥控器上下键方向：true = 上键下一个台
     var keyUpNext by remember { mutableStateOf(repo.prefs.keyUpNext) }
@@ -324,6 +348,11 @@ fun PlayerScreen(
         repo.prefs.decodeMode = m
         controller.decodeMode = m
         val ch = current
+        if (usingVlc) {
+            // VLC 自己按 --avcodec-hw=any 走硬解并自动回落软解，不吃这个开关
+            toast = "解码：${m.label} · 仅对 ExoPlayer 生效"
+            return
+        }
         if (ch != null) {
             controller.replay(ch)
             toast = "解码：${m.label} · 已重新起播"
@@ -332,15 +361,92 @@ fun PlayerScreen(
         }
     }
 
+    // ── 引擎调度 ────────────────────────────────────────────────────
+
+    /**
+     * 拿到 libVLC 引擎，第一次用的时候才创建。
+     *
+     * 它就是「ExoPlayer 吃不下的台」的兜底：MPEG-2 视频、AC3/EAC3 音频、
+     * PMT 与内容不符的非标准 TS，这些台在 ExoPlayer 上必然黑屏或报错。
+     */
+    fun ensureVlc(): VlcEngine {
+        vlcHolder.engine?.let { return it }
+        val e = VlcEngine(context.applicationContext)
+        e.onStarted = { fatalError = null }
+        e.onError = { msg ->
+            // 两个引擎都失败了，这条流基本没救。明确告诉用户，别让它一直转圈等。
+            fatalError = PlaybackIssue(
+                code = "VLC_FAILED",
+                message = msg,
+                stage = PlaybackIssue.Stage.GAVE_UP,
+                attempt = 0,
+                hint = "ExoPlayer 和 VLC 都播不了这个台，多为地址失效或码流已损坏，建议换台或换源",
+            )
+        }
+        vlcHolder.engine = e
+        return e
+    }
+
+    /**
+     * 用指定引擎起播。切引擎时一定先停另一边：
+     * 两个播放器同时开着会抢音频输出（表现为一个有声一个静音）并白占解码器。
+     */
+    fun startEngine(vlc: Boolean, ch: Channel) {
+        if (vlc) {
+            // VLC 初始化可能失败（个别机型的 ABI 或系统库不匹配）。
+            // 失败就老老实实退回 ExoPlayer——宁可少一个引擎，也不能让本来能播的台变黑屏。
+            val engine = runCatching { ensureVlc() }.getOrNull()
+            if (engine == null) {
+                toast = "VLC 引擎初始化失败，仍用 ExoPlayer"
+                startEngine(false, ch)
+                return
+            }
+            controller.stop()
+            usingVlc = true
+            // ExoPlayer 的编码/解码器诊断对 VLC 不成立，留着只会误导排查
+            mediaInfo = ""
+            decoderName = "VLC 引擎"
+            engine.play(ch)
+        } else {
+            vlcHolder.engine?.stop()
+            usingVlc = false
+            // 个别源的地址会让 ExoPlayer 直接抛参数异常，兜住，别把整个界面带崩
+            runCatching { controller.play(ch) }
+                .onFailure { toast = "这个台播不了：${it.message ?: "地址无效"}" }
+        }
+    }
+
+    /**
+     * 切换播放引擎并立即重开当前台。
+     *
+     * 必须真的重开——两个引擎各自持有解码器和音频输出，
+     * 只改设置不切换的话，屏幕上是旧引擎的画面，用户会以为没生效。
+     */
+    fun setPlayEngine(e: PlayEngine) {
+        if (playEngine == e) return
+        playEngine = e
+        repo.prefs.playEngine = e
+        val ch = current
+        if (ch == null) {
+            toast = "引擎：${e.label}"
+            return
+        }
+        val knownBad = activeId?.let {
+            repo.prefs.channelKey(ch) in repo.prefs.vlcOnlyChannels(it)
+        } == true
+        startEngine(e == PlayEngine.VLC || (e == PlayEngine.AUTO && knownBad), ch)
+        toast = "引擎：${e.label} · 已重新起播"
+    }
+
     /** 播放/暂停切换：直播暂停是停在同一帧，恢复即继续，不需要重新拉流。 */
     fun togglePause() {
         if (current == null) return
         if (paused) {
-            controller.resume()
+            if (usingVlc) vlcHolder.engine?.resume() else controller.resume()
             paused = false
             toast = "继续播放"
         } else {
-            controller.pause()
+            if (usingVlc) vlcHolder.engine?.pause() else controller.pause()
             paused = true
             toast = "已暂停 · OK / 双击继续"
         }
@@ -361,14 +467,77 @@ fun PlayerScreen(
         val idx = list.indexOfFirst { it.id == ch.id }
         // 换台提示：电视上原来换完台屏幕没有任何反馈，不知道切到第几台了
         osd = ChannelOsd(if (idx >= 0) idx + 1 else 0, ch)
-        // 个别源的地址会让 ExoPlayer 直接抛参数异常，兜住它，别把整个界面带崩
-        runCatching { controller.play(ch) }
-            .onFailure { toast = "这个台播不了：${it.message ?: "地址无效"}" }
+
+        // 引擎选择：强制 VLC；或 AUTO 模式下这个台以前在 ExoPlayer 上失败过，直接走 VLC
+        val pref = repo.prefs.playEngine
+        val knownBad = sourceId != null &&
+            repo.prefs.channelKey(ch) in repo.prefs.vlcOnlyChannels(sourceId)
+        startEngine(pref == PlayEngine.VLC || (pref == PlayEngine.AUTO && knownBad), ch)
 
         // P3 预热：只预热同一分组内的下一个台。跨分组说明用户在跳组，不猜。
         // 3 秒去抖和失败静默都在 Warmer 里；这里算错了也只是少命中一次，不影响播放。
         val next = if (idx >= 0) list.getOrNull(idx + 1) else null
         Warmer.schedule(next?.takeIf { it.group == ch.group })
+    }
+
+    // 播放异常回调放在这里，因为它要调 startEngine（AUTO 模式自动换引擎）。
+    SideEffect {
+        controller.onIssue = { ev ->
+            errorCode = ev.code
+            when (ev.stage) {
+                PlaybackIssue.Stage.RETRYING ->
+                    toast = "${ev.kind}问题 · ${ev.code}，${ev.attempt}/3 次后重连"
+                PlaybackIssue.Stage.STALL_RECOVER ->
+                    // 音频解码不支持时给出的是处置说明，不要被「卡顿」文案盖掉
+                    toast = if (ev.code == "AUDIO_CODEC_UNSUPPORTED") ev.message else "卡顿 15 秒 · 自动重连中"
+                PlaybackIssue.Stage.GAVE_UP -> {
+                    val ch = current
+                    // AUTO：ExoPlayer 试满 3 次还不行，且不是「地址根本打不开」这类
+                    // 换引擎也没用的问题，就自动改用 VLC 再来一次，并记住这个台。
+                    val autoSwitch = repo.prefs.playEngine == PlayEngine.AUTO &&
+                        !usingVlc && ch != null && ev.switchEngineMayHelp
+                    if (autoSwitch) {
+                        activeId?.let { repo.prefs.markVlcOnly(it, ch!!) }
+                        toast = "ExoPlayer 播不了（${ev.kind}），已自动改用 VLC"
+                        startEngine(true, ch!!)
+                    } else {
+                        fatalError = ev
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 数字键换台。
+     *
+     * 序号用的就是频道列表里显示的那个号（从 1 开始、按整份列表排），
+     * 所以「按 1 回到 1 频道」和肉眼看到的编号完全一致。
+     */
+    fun jumpToNumber(text: String) {
+        val n = text.toIntOrNull() ?: return
+        val list = result?.channels.orEmpty()
+        if (list.isEmpty()) return
+        if (n < 1 || n > list.size) {
+            toast = "没有第 $n 台（共 ${list.size} 个频道）"
+            return
+        }
+        playChannel(list[n - 1], activeId)
+    }
+
+    fun pressDigit(d: Char) {
+        // 最多 3 位：四位数已经超出任何频道的编号范围，再攒只会误判
+        digitBuf = (digitBuf + d).takeLast(3)
+    }
+
+    // 数字键：1.6 秒内没有新输入就跳台；期间继续按数字则接着拼接。
+    // 用 LaunchedEffect 而不是定时器，是因为 key 一变它自己会取消上一次计时。
+    LaunchedEffect(digitBuf) {
+        if (digitBuf.isEmpty()) return@LaunchedEffect
+        delay(1_600)
+        val text = digitBuf
+        digitBuf = ""
+        jumpToNumber(text)
     }
 
     /** 换台提示：顺手拉一次台标，3 秒后自动收起。台标走内存缓存，反复切台不会重复下载。 */
@@ -586,8 +755,21 @@ fun PlayerScreen(
                     KeyEvent.KEYCODE_BACK -> false
                     else -> false
                 }
-                // 出错时把按键让给「重试 / 再试一次」按钮，否则按 OK 只会切暂停
-                loadError != null || fatalError != null -> false
+                // 出错时把按键让给「重试 / 再试一次」按钮，否则按 OK 只会切暂停。
+                // 但菜单键必须留个口子——错误提示里写着「到设置里把引擎切到 VLC」，
+                // 不给开设置的话那句提示就成了废话。
+                loadError != null || fatalError != null -> when (key) {
+                    KeyEvent.KEYCODE_MENU -> { openLobby(LobbyTab.Settings); true }
+                    else -> false
+                }
+                // 数字键换台：按 1 = 第 1 台；1、0 = 第 10 台。
+                // 遥控器有两条数字键码（主键盘区与数字小键盘），两种都收。
+                key in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 -> {
+                    pressDigit('0' + (key - KeyEvent.KEYCODE_0)); true
+                }
+                key in KeyEvent.KEYCODE_NUMPAD_0..KeyEvent.KEYCODE_NUMPAD_9 -> {
+                    pressDigit('0' + (key - KeyEvent.KEYCODE_NUMPAD_0)); true
+                }
                 // 上/下键的换台方向可切换：不同遥控器、不同人的习惯不一样
                 key == KeyEvent.KEYCODE_DPAD_UP -> {
                     step(if (keyUpNext) 1 else -1); true
@@ -602,9 +784,16 @@ fun PlayerScreen(
                 key == KeyEvent.KEYCODE_CHANNEL_DOWN -> {
                     step(-1); true
                 }
-                // OK：播放态控制暂停/继续（侧栏态已在上面放行给 Compose 做确认）
+                // OK：正在输频道号就立即跳台，否则控制暂停/继续
                 key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER -> {
-                    togglePause(); true
+                    if (digitBuf.isNotEmpty()) {
+                        val text = digitBuf
+                        digitBuf = ""
+                        jumpToNumber(text)
+                    } else {
+                        togglePause()
+                    }
+                    true
                 }
                 // 菜单键 / 三横线键呼出侧栏（KEYCODE_MENU = 82，两种遥控器都发这个码）
                 key == KeyEvent.KEYCODE_MENU -> {
@@ -630,8 +819,22 @@ fun PlayerScreen(
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        // 唯一的播放器挂载点：尺寸不变、父容器不变，切界面不会重建
-        AndroidView(factory = { playerView }, modifier = Modifier.fillMaxSize())
+        // media3 播放视图**常驻**：父容器与位置永不变化。
+        // 历史上把同一个 PlayerView 挪到另一个父容器会抛
+        // "The specified child already has a parent" 闪退，所以这里只切可见性、不换挂载点。
+        // 用 INVISIBLE 而不是 alpha：SurfaceView 只有不可见时才真正让出显示层。
+        AndroidView(
+            factory = { playerView },
+            modifier = Modifier.fillMaxSize(),
+            update = { it.visibility = if (usingVlc) View.INVISIBLE else View.VISIBLE },
+        )
+        if (usingVlc) {
+            // VLC 的画面视图按需进场/离场，不会和 media3 同时渲染
+            AndroidView(
+                factory = { vlcHolder.engine?.view ?: View(context) },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
 
         if (panel == null) {
             // 暂停角标：直播暂停停在同一帧，画面上必须给个明确提示，否则以为卡住了
@@ -650,6 +853,40 @@ fun PlayerScreen(
                         .background(Color(0xCC1E293B))
                         .padding(horizontal = if (isTv) 24.dp else 16.dp, vertical = if (isTv) 12.dp else 8.dp),
                 )
+            }
+
+            // 数字键输入提示：遥控器按了数字就地显示，1.6 秒后自动跳台
+            if (digitBuf.isNotEmpty()) {
+                Row(
+                    Modifier.align(Alignment.TopStart)
+                        .padding(
+                            start = if (isTv) 48.dp else 20.dp,
+                            top = if (isTv) 32.dp else 18.dp,
+                        )
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xCC0B1220))
+                        .padding(horizontal = if (isTv) 24.dp else 16.dp, vertical = if (isTv) 12.dp else 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "跳到",
+                        color = TextDim,
+                        fontSize = if (isTv) 18.sp else 14.sp,
+                    )
+                    Text(
+                        digitBuf,
+                        color = Accent,
+                        fontSize = if (isTv) 34.sp else 26.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(start = 10.dp),
+                    )
+                    Text(
+                        "_",
+                        color = Accent,
+                        fontSize = if (isTv) 30.sp else 22.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
             }
 
             // 一层手势：轻点左半屏出频道、右半屏出设置；竖滑按起始位置分区（左换台/中亮度/右音量）
@@ -803,21 +1040,46 @@ fun PlayerScreen(
                         textAlign = TextAlign.Center,
                     )
                     Text(
-                        if (fatal.kind == "解码器") "到「设置」换一种解码方式（软解/硬解）再试。"
-                        else "检查订阅地址是否可达，或换一个直播源。",
+                        fatal.hint.ifBlank {
+                            if (fatal.kind == "解码器") "到「设置」换一种解码方式（软解/硬解）再试。"
+                            else "检查订阅地址是否可达，或换一个直播源。"
+                        },
                         color = TextDim,
                         fontSize = if (isTv) 13.sp else 11.sp,
                         modifier = Modifier.padding(top = 6.dp),
                         textAlign = TextAlign.Center,
                     )
-                    Button(
-                        onClick = {
-                            fatalError = null
-                            current?.let { controller.replay(it) }
-                        },
-                        modifier = Modifier.padding(top = 14.dp),
+                    Row(
+                        Modifier.padding(top = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("再试一次", fontSize = if (isTv) 16.sp else 14.sp)
+                        Button(
+                            onClick = {
+                                fatalError = null
+                                current?.let { ch ->
+                                    if (usingVlc) vlcHolder.engine?.play(ch) else controller.replay(ch)
+                                }
+                            },
+                        ) {
+                            Text("再试一次", fontSize = if (isTv) 16.sp else 14.sp)
+                        }
+                        // 一键换引擎：比让用户自己摸进设置里找「播放引擎」快得多，
+                        // 也是这台机器上最可能真正解决问题的一步。
+                        if (!usingVlc && playEngine != PlayEngine.VLC) {
+                            TextButton(
+                                onClick = {
+                                    val ch = current ?: return@TextButton
+                                    fatalError = null
+                                    val sid = activeId
+                                    if (sid != null) repo.prefs.markVlcOnly(sid, ch)
+                                    toast = "改用 VLC 引擎试播"
+                                    startEngine(true, ch)
+                                },
+                                modifier = Modifier.padding(start = 10.dp),
+                            ) {
+                                Text("改用 VLC 试播", fontSize = if (isTv) 16.sp else 14.sp)
+                            }
+                        }
                     }
                 }
             }
@@ -891,8 +1153,11 @@ fun PlayerScreen(
                 onRefresh = { activeId?.let { load(it, autoplay = current == null, force = true) } },
                 decoder = decoderName,
                 errorCode = errorCode,
+                mediaInfo = mediaInfo,
                 decodeMode = decodeMode,
                 onDecodeMode = { setDecodeMode(it) },
+                playEngine = playEngine,
+                onPlayEngine = { setPlayEngine(it) },
                 keyUpNext = keyUpNext,
                 onKeyUpNext = { v ->
                     keyUpNext = v

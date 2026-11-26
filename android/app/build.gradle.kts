@@ -15,8 +15,14 @@ android {
         targetSdk = 36
         // 覆盖安装（升级）必须递增 versionCode；包名与签名不变时
         // SharedPreferences（源列表、锁定、上次频道）会自动保留
-        versionCode = 25
-        versionName = "0.4.11"
+        versionCode = 26
+        versionName = "0.5.0"
+
+        ndk {
+            // libVLC 每个 ABI 的 .so 就有 38–50MB，四种全带会让 APK 破百兆。
+            // 只留真机用得上的一对：32 位老盒子（HG680-GC 这类）和 64 位手机/盒子。
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+        }
     }
 
     buildTypes {
@@ -43,6 +49,12 @@ android {
     buildFeatures { compose = true }
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        jniLibs {
+            // 必须压缩存放：libVLC 的 .so 未压缩时两个 ABI 合计近 90MB，
+            // 压缩后约 35MB，安装包才落在可接受范围。代价是安装时解压到 /data，
+            // 老盒子一般是 8GB 闪存，够用。
+            useLegacyPackaging = true
+        }
     }
 }
 
@@ -68,6 +80,10 @@ dependencies {
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+
+    // 第二播放引擎：libVLC。Media3 没有内置软解，MPEG-2 / AC3 / 非标准 TS 只能靠它。
+    // 3.6.5 是 3.x 稳定线的成熟版本，minSdk 17，兼容 Android 5+。
+    implementation("org.videolan.android:libvlc-all:3.6.5")
 
     // 二维码生成（设备端显示，手机扫码推送）；不做本机扫码，因此不含 CameraX / ML Kit
     implementation("com.google.zxing:core:3.5.3")

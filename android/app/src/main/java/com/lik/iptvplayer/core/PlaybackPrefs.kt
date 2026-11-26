@@ -22,7 +22,30 @@ enum class DecodeMode(val key: String, val label: String) {
 }
 
 /**
- * 播放偏好：锁定源 / 上次使用的源 / 每个源上次看的频道 / 解码方式。
+ * 播放引擎。
+ *
+ * 两个引擎各有硬边界，所以必须能切：
+ * - [EXO]：Media3/ExoPlayer。轻、启动快、内存占用低，能播主流 H.264 + AAC。
+ *   但**没有内置软件解码器**，遇到 MPEG-2 视频、AC3/EAC3 音频、非标准 TS
+ *   会直接报 ERROR_CODE_DECODER_INIT_FAILED 或卡死。
+ * - [VLC]：libVLC。自带全套软解与容错，能播上述那些台；
+ *   代价是内存占用更高，老盒子上纯软解 1080p 高码率会掉帧。
+ * - [AUTO]：默认 ExoPlayer；某个台连试 3 次失败，自动改用 VLC 重来一次，
+ *   并记住这个台以后直接走 VLC。用户不用自己判断，坏台自己会好。
+ */
+enum class PlayEngine(val key: String, val label: String) {
+    AUTO("auto", "自动"),
+    EXO("exo", "ExoPlayer"),
+    VLC("vlc", "VLC"),
+    ;
+
+    companion object {
+        fun of(key: String?): PlayEngine = entries.firstOrNull { it.key == key } ?: AUTO
+    }
+}
+
+/**
+ * 播放偏好：锁定源 / 上次使用的源 / 每个源上次看的频道 / 解码方式 / 播放引擎。
  * 单独一份 SharedPreferences，与源列表（SourceStore）解耦。
  * 覆盖安装（包名与签名不变）时自动保留，用户不需要重新设置。
  */
@@ -79,6 +102,30 @@ class PlaybackPrefs(context: Context) {
         get() = DecodeMode.of(prefs.getString(KEY_DECODE_MODE, null))
         set(v) = prefs.edit().putString(KEY_DECODE_MODE, v.key).apply()
 
+    /** 播放引擎：默认自动（ExoPlayer 优先，坏台自动切 VLC）。 */
+    var playEngine: PlayEngine
+        get() = PlayEngine.of(prefs.getString(KEY_PLAY_ENGINE, null))
+        set(v) = prefs.edit().putString(KEY_PLAY_ENGINE, v.key).apply()
+
+    /**
+     * 在 ExoPlayer 上失败过、已改走 VLC 的台。
+     * 记的是频道的稳定引用（见 [channelKey]），订阅换序也不会认错。
+     * AUTO 模式下先查这里，命中就直接用 VLC 起播，省掉那 3 次无谓重试。
+     */
+    fun vlcOnlyChannels(sourceId: String): Set<String> =
+        prefs.getStringSet("vlc_only_$sourceId", null)?.toSet() ?: emptySet()
+
+    fun markVlcOnly(sourceId: String, channel: Channel) {
+        val next = vlcOnlyChannels(sourceId).toMutableSet()
+        if (next.add(channelKey(channel))) {
+            prefs.edit().putStringSet("vlc_only_$sourceId", next).apply()
+        }
+    }
+
+    fun clearVlcOnly(sourceId: String) {
+        prefs.edit().remove("vlc_only_$sourceId").apply()
+    }
+
     /**
      * 遥控器上/下键的换台方向。
      * true = 上键切下一个台（默认，用户按顺手的习惯），false = 上键切上一个台。
@@ -105,6 +152,7 @@ class PlaybackPrefs(context: Context) {
         const val KEY_LOCKED = "locked_source_id"
         const val KEY_LAST_SOURCE = "last_source_id"
         const val KEY_DECODE_MODE = "decode_mode"
+        const val KEY_PLAY_ENGINE = "play_engine"
         const val KEY_UP_NEXT = "key_up_next"
         const val KEY_UPDATE_URL = "update_url"
         const val KEY_LAST_SEEN = "last_seen_version"

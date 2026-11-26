@@ -5,8 +5,10 @@ import android.os.Handler
 import android.os.Looper
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -14,6 +16,7 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.mediacodec.MediaCodecInfo
+import androidx.media3.exoplayer.mediacodec.MediaCodecRenderer
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -35,6 +38,8 @@ data class PlaybackIssue(
     val message: String,
     val stage: Stage,
     val attempt: Int, // 第几次重试（1..3）；卡顿恢复为 0
+    /** 给用户的处置建议。空字符串表示用默认文案（沿用旧行为）。 */
+    val hint: String = "",
 ) {
     enum class Stage { RETRYING, GAVE_UP, STALL_RECOVER }
 
@@ -44,6 +49,16 @@ data class PlaybackIssue(
         stage == Stage.STALL_RECOVER -> "卡顿"
         else -> "播放"
     }
+
+    /**
+     * 是不是「换个引擎就能好」的失败。
+     *
+     * IO_* 是地址/网络层面打不开，VLC 也一样打不开，换引擎没意义；
+     * 其余（解码器缺失、码流不合法、无限卡顿）恰恰是 ExoPlayer 的能力边界，
+     * 交给 VLC 往往能播——AUTO 模式据此决定要不要自动换引擎。
+     */
+    val switchEngineMayHelp: Boolean =
+        stage == Stage.GAVE_UP && !code.contains("IO_", ignoreCase = true)
 }
 
 /**
@@ -75,6 +90,28 @@ class PlayerController(
 
     /** 实际启用的解码器名，用于验证走的是硬解还是软解（软解名通常含 c2.android / OMX.google）。 */
     var onDecoder: (String) -> Unit = { _ -> }
+
+    /**
+     * 当前流的编码摘要，例如 `H.264 1280×720 · AC3`。
+     *
+     * 用户报「黑屏 / 卡住 / 报错」时，光有错误码没法判断是哪一类——
+     * 把视频编码、分辨率、音频编码摆到设置页，一张截图就能定位到底是
+     * MPEG-2 没解码器、还是 AC3 没解码器、还是码流本身坏了。
+     */
+    var onTracks: (String) -> Unit = { _ -> }
+
+    /** 最近一条流的视频/音频 MIME，供解码失败时判断「是不是本机根本没这个解码器」。 */
+    @Volatile
+    var videoMime: String = ""
+        private set
+
+    @Volatile
+    var audioMime: String = ""
+        private set
+
+    /** 已经因为音频解码不了而关掉音频轨（每条流只尝试一次，避免死循环）。 */
+    @Volatile
+    private var audioBypassed = false
 
     private val appContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -149,6 +186,10 @@ class PlayerController(
                 override fun onPlayerError(error: PlaybackException) {
                     onPlayerErrorInternal(error)
                 }
+
+                override fun onTracksChanged(tracks: Tracks) {
+                    reportTracks(tracks)
+                }
             })
             exo.addAnalyticsListener(object : AnalyticsListener {
                 // Media3 的这段回调按轨道拆成了 onAudio/onVideo，视频才是我们要看的
@@ -176,15 +217,103 @@ class PlayerController(
         }
     }
 
+    /** 把 mime 翻译成台标上看得懂的名字；认不出的就取斜杠后半段。 */
+    private fun shortCodec(mime: String): String = when (mime.lowercase()) {
+        "video/avc" -> "H.264"
+        "video/hevc" -> "H.265"
+        "video/mpeg2", "video/mp2v" -> "MPEG-2"
+        "video/mp4v-es" -> "MPEG-4"
+        "video/x-vnd.on2.vp9" -> "VP9"
+        "video/av01" -> "AV1"
+        "audio/mp4a-latm" -> "AAC"
+        "audio/ac3" -> "AC3"
+        "audio/eac3" -> "EAC3"
+        "audio/ac4" -> "AC4"
+        "audio/mpeg" -> "MP3"
+        "audio/mpeg-l2", "audio/mp2" -> "MP2"
+        else -> mime.substringAfter('/').take(12)
+    }
+
+    /**
+     * 本机有没有这个编码的解码器。
+     * 查不到就是「装多少参数都没用」，只能换引擎或换台——这个判断要准确，
+     * 否则会把「源地址失效」误报成「解码器缺失」，用户白折腾。
+     */
+    private fun hasDecoder(mime: String): Boolean {
+        if (mime.isBlank()) return true
+        return runCatching { MediaCodecUtil.getDecoderInfo(mime, false, false) }.getOrNull() != null
+    }
+
+    private fun reportTracks(tracks: Tracks) {
+        var video = ""
+        var audio = ""
+        for (group in tracks.groups) {
+            if (group.length == 0) continue
+            val format = group.getTrackFormat(0)
+            when (group.type) {
+                C.TRACK_TYPE_VIDEO -> {
+                    videoMime = format.sampleMimeType.orEmpty()
+                    video = buildString {
+                        append(shortCodec(videoMime))
+                        if (format.width > 0 && format.height > 0) append(" ${format.width}×${format.height}")
+                    }
+                }
+                C.TRACK_TYPE_AUDIO -> {
+                    audioMime = format.sampleMimeType.orEmpty()
+                    audio = shortCodec(audioMime)
+                }
+            }
+        }
+        val text = listOf(video, audio).filter { it.isNotBlank() }.joinToString(" · ")
+        if (text.isNotBlank()) onTracks(text)
+    }
+
+    /**
+     * 轨道约束，每次起播都重新下发：
+     * - 最高 1080p / 12Mbps：master playlist 里若同时有 4K 变体，默认选择器会挑它，
+     *   老盒子解不动就表现为「黑屏 / 卡死」。压到 1080p 能直接消掉这一类。
+     * - 音频轨按 [audioBypassed] 开关：AC3 这类本机没解码器时关掉音频保画面。
+     */
+    private fun applyTrackParams() {
+        runCatching {
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setMaxVideoSize(1920, 1080)
+                .setMaxVideoBitrate(12_000_000)
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, audioBypassed)
+                .build()
+        }
+    }
+
     private fun onPlayerErrorInternal(error: PlaybackException) {
         val code = error.errorCodeName
         lastErrorCode = code
         healthyMs = 0L // 出错即中断连续播放，重新攒健康时长
         val msg = error.message ?: "播放失败"
         val ch = currentChannel
+
+        // 音频解码器初始化失败：不要整体放弃，把音频轨关掉继续出画面。
+        // 国内源大量用 AC3/EAC3，而盒子往往只有 AAC 解码器——一关音频就活了。
+        val failMime = decoderFailMime(error)
+        if (failMime != null && failMime.startsWith("audio/") && !audioBypassed && ch != null) {
+            audioBypassed = true
+            applyTrackParams()
+            onIssue(
+                PlaybackIssue(
+                    code = "AUDIO_CODEC_UNSUPPORTED",
+                    message = "音频编码 ${shortCodec(failMime)} 本机不支持，已关闭音频继续播放",
+                    stage = PlaybackIssue.Stage.STALL_RECOVER,
+                    attempt = 0,
+                    hint = "想听声音需要用 VLC 引擎（设置 → 播放引擎）",
+                ),
+            )
+            retryAttempt = 0
+            doPlay(ch)
+            return
+        }
+
         if (ch == null || retryAttempt >= retryDelays.size) {
-            // 3 次都失败：不再静默重试，把错误码和次数交给 UI 常驻显示
-            onIssue(PlaybackIssue(code, msg, PlaybackIssue.Stage.GAVE_UP, retryAttempt))
+            // 3 次都失败：不再静默重试，把错误码和处置建议交给 UI 常驻显示
+            onIssue(PlaybackIssue(code, msg, PlaybackIssue.Stage.GAVE_UP, retryAttempt, buildHint(code)))
             onError(code + " / " + msg)
             return
         }
@@ -193,6 +322,40 @@ class PlayerController(
         onIssue(PlaybackIssue(code, msg, PlaybackIssue.Stage.RETRYING, retryAttempt))
         // 必须在主线程重开；Handler 回调默认就在主线程
         mainHandler.postDelayed({ restart(ch, resetRetry = false) }, wait)
+    }
+
+    /** 从异常链里挖出「哪个 mime 的解码器起不来」，挖不到返回 null。 */
+    private fun decoderFailMime(error: PlaybackException): String? {
+        var cause: Throwable? = error
+        var guard = 0
+        while (cause != null && guard++ < 4) {
+            if (cause is MediaCodecRenderer.DecoderInitializationException) return cause.mimeType
+            cause = cause.cause
+        }
+        return null
+    }
+
+    /**
+     * 把错误码翻译成能照做的建议。
+     * 用户看到的是一句人话，而不是 ERROR_CODE_DECODER_INIT_FAILED。
+     */
+    private fun buildHint(code: String): String = when {
+        code.contains("DECODER_QUERY_FAILED", true) ->
+            "本机完全没有这个编码的解码器" +
+                (videoMime.takeIf { it.isNotBlank() }?.let { "（${shortCodec(it)}）" } ?: "") +
+                "，请到设置里把播放引擎切到 VLC"
+        code.contains("DECODER_INIT_FAILED", true) ->
+            "解码器起不来（${videoMime.takeIf { it.isNotBlank() }?.let { shortCodec(it) } ?: "未知编码"}），" +
+                "先在设置里换「解码方式」，仍不行就把引擎切到 VLC"
+        code.contains("BAD_HTTP_STATUS", true) ->
+            "源地址返回错误（多为 403 防盗链 / 404 已失效），换一个源或联系源提供者"
+        code.contains("IO_", true) ->
+            "网络打不开这个地址：检查网络是否连通、地址是否过期"
+        code.contains("PARSING_CONTAINER", true) ->
+            "码流结构不标准（TS 的 PMT 与内容不符），ExoPlayer 无法解析，请把引擎切到 VLC"
+        code.contains("UNSUPPORTED", true) ->
+            "这个格式 ExoPlayer 不支持，请把引擎切到 VLC"
+        else -> ""
     }
 
     /** 每 3 秒采样：处于 buffering 且播放位置连续 15 秒不前进，就主动重开。 */
@@ -246,12 +409,17 @@ class PlayerController(
         // 手动换台是全新的一次播放，清掉上一台的错误/卡顿累积
         retryAttempt = 0
         lastErrorCode = ""
+        // 换台必须把「静音保画面」的开关放回去：上一个台的 AC3 关过音频，
+        // 不还原的话下一个 AAC 的台也会没声音。
+        audioBypassed = false
         resetStall()
         doPlay(channel)
     }
 
     private fun doPlay(channel: Channel) {
         currentChannel = channel
+        // 每次起播都重新下发轨道约束（含音频轨开关状态）
+        applyTrackParams()
         // 从 error 状态恢复必须换新的 MediaSource，不能只调 play()
         val factory = OkHttpDataSource.Factory(Network.client)
             .setUserAgent(channel.userAgent.ifBlank { defaultAgent })
@@ -288,6 +456,8 @@ class PlayerController(
      */
     fun replay(channel: Channel?) {
         val ch = channel ?: return
+        // 用户手动「再试一次」也是全新一轮：把静音兜底还原，重新给音频一次机会
+        audioBypassed = false
         restart(ch, resetRetry = true)
     }
 
