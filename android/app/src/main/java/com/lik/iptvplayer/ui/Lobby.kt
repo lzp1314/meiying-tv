@@ -976,7 +976,7 @@ private fun SettingsPage(
         item {
             Text(
                 when (playEngine) {
-                    PlayEngine.AUTO -> "自动：先用 ExoPlayer，某个台连试 3 次失败就自动改用 VLC，并记住这个台。"
+                    PlayEngine.AUTO -> "自动：默认 ExoPlayer，6 秒没画面或解码失败自动换 VLC；谁真放出画面就记住谁，下次直接用。手动切过也算数。"
                     PlayEngine.EXO -> "ExoPlayer：启动快、省内存，但播不了 MPEG-2 视频和 AC3 音频的老源。"
                     PlayEngine.VLC -> "VLC：兼容性最强，几乎所有源都能播；内存占用更高，老盒子可能略卡。"
                 },

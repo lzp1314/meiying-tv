@@ -101,8 +101,8 @@ class VlcEngine(context: Context) {
         val attempts = listOf(
             mutableListOf(
                 "--avcodec-hw=any",
-                "--network-caching=1500",
-                "--live-caching=1500",
+                "--network-caching=$CACHE_MS",
+                "--live-caching=$CACHE_MS",
                 "--no-sub-autodetect-file",
             ),
             mutableListOf(),
@@ -225,11 +225,13 @@ class VlcEngine(context: Context) {
         val media = Media(vlc, Uri.parse(channel.url)).apply {
             // 第二参数 false = 不强制硬解，允许失败后回落软解
             setHWDecoderEnabled(true, false)
-            // #EXTVLCOPT 里解析出来的 UA / Referer，很多源靠这个过防盗链
-            if (channel.userAgent.isNotBlank()) addOption(":http-user-agent=${channel.userAgent}")
+            // 请求头必须和 ExoPlayer 那套一致，否则「换引擎」等于「换身份」：
+            // 有的源只认特定 UA，ExoPlayer 能播、VLC 拿默认 UA 上去就是 403。
+            val ua = channel.userAgent.ifBlank { DEFAULT_UA }
+            addOption(":http-user-agent=$ua")
             if (channel.referrer.isNotBlank()) addOption(":http-referrer=${channel.referrer}")
-            addOption(":network-caching=1500")
-            addOption(":live-caching=1500")
+            addOption(":network-caching=$CACHE_MS")
+            addOption(":live-caching=$CACHE_MS")
         }
         runCatching {
             mp.setMedia(media)
@@ -241,16 +243,18 @@ class VlcEngine(context: Context) {
     }
 
     /**
-     * 起播看门狗：20 秒还没出画面就判定失败。
+     * 起播看门狗：15 秒还没出画面就判定失败。
      *
      * VLC 对「服务器连上了但一直不下数据」不会主动报错，表现为无限缓冲——
-     * 正是用户说的「卡住不动」。这里替它兜住，好让 AUTO 模式切回 ExoPlayer 或提示换源。
+     * 正是用户说的「卡住不动」。这里替它兜住，好让 AUTO 模式切回 ExoPlayer。
+     * 15 秒是按国内源最慢的起播留的余量：再长用户就一直对着黑屏等，
+     * 再短会把真的慢源误杀（VLC 出画面通常 1–3 秒）。
      */
     private fun armWatchdog() {
         cancelWatchdog()
-        val r = Runnable { onError("VLC 起播超时：20 秒没有画面，多为源地址不可用或码流异常") }
+        val r = Runnable { onError("VLC 起播超时：15 秒没有画面，多为源地址不可用或码流异常") }
         startWatchdog = r
-        mainHandler.postDelayed(r, 20_000)
+        mainHandler.postDelayed(r, WATCHDOG_MS)
     }
 
     private fun cancelWatchdog() {
@@ -285,5 +289,20 @@ class VlcEngine(context: Context) {
         runCatching { libVlc?.release() }
         mediaPlayer = null
         libVlc = null
+    }
+
+    private companion object {
+        /** 必须与 PlayerController 的 defaultAgent 一致，换引擎才不会换掉身份。 */
+        const val DEFAULT_UA = "IPTVPlayer/0.1 (Android)"
+
+        /**
+         * 直播缓冲（毫秒）。
+         * 原来 1500ms：弱网更稳，但换台和起播明显迟钝，HLS 直播上尤其像「卡住」。
+         * 1000ms 是跟手与抗抖的折中；真遇到抖动还有 ExoPlayer 可切。
+         */
+        const val CACHE_MS = 1000
+
+        /** 起播看门狗：VLC 出画面一般 1–3 秒，15 秒还不行就该判死了。 */
+        const val WATCHDOG_MS = 15_000L
     }
 }

@@ -98,6 +98,14 @@ class PlayerController(
     var onDecoder: (String) -> Unit = { _ -> }
 
     /**
+     * 首帧真正上屏（每次起播只报一次）。
+     *
+     * AUTO 模式靠它判断「ExoPlayer 这个引擎对这个台是有效的」，只有出过画面
+     * 才写引擎记忆。不能拿「没报错」当成功——有声音没画面时播放状态是 READY。
+     */
+    var onFirstFrame: () -> Unit = { }
+
+    /**
      * 当前流的编码摘要，例如 `H.264 1280×720 · AC3`。
      *
      * 用户报「黑屏 / 卡住 / 报错」时，光有错误码没法判断是哪一类——
@@ -234,7 +242,11 @@ class PlayerController(
                     output: Any,
                     renderTimeMs: Long,
                 ) {
-                    if (firstFrameAt == 0L) firstFrameAt = android.os.SystemClock.elapsedRealtime()
+                    if (firstFrameAt == 0L) {
+                        firstFrameAt = android.os.SystemClock.elapsedRealtime()
+                        // 只在「本次起播的第一次」上报，给 AUTO 记录引擎有效性用
+                        onFirstFrame()
+                    }
                 }
             })
         }
@@ -556,11 +568,11 @@ class PlayerController(
         preparedAt = 0L
         onIssue(
             PlaybackIssue(
-                code = "NO_FIRST_FRAME_10S",
-                message = "起播 10 秒没有出画面（黑屏）",
+                code = "NO_FIRST_FRAME_6S",
+                message = "起播 6 秒没有出画面（黑屏）",
                 stage = PlaybackIssue.Stage.GAVE_UP,
                 attempt = retryAttempt,
-                hint = "多半是硬解解不动这个码流：把播放引擎切到 VLC，或把解码方式改成软解",
+                hint = "多半是硬解解不动这个码流：已自动尝试换个引擎，若仍不行把解码方式改成软解",
             ),
         )
     }
@@ -686,6 +698,6 @@ class PlayerController(
         const val STALL_LIMIT_MS = 15_000L
         const val HEALTHY_RESET_MS = 20_000L
         /** 起播后多久还没有首帧就判黑屏。10 秒足够慢速源起播，又不会让用户干等。 */
-        const val BLACK_LIMIT_MS = 10_000L
+        const val BLACK_LIMIT_MS = 6_000L
     }
 }

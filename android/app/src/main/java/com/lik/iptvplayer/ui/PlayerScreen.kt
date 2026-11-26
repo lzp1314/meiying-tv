@@ -205,16 +205,20 @@ fun PlayerScreen(
     var vlcDiag by remember { mutableStateOf("") }
 
     /**
-     * 国科微 GK6323（华为/中兴/烽火那批运营商盒子）的 OMX 硬解对 1080i、高 profile H.264
-     * 有已知兼容问题，典型表现是「出几秒→黑屏」或直接解不出来。
-     * 这类机器上 AUTO 直接优先 VLC，比让用户在两个引擎之间摸要省事。
+     * 本次播放的引擎试错轨迹，只在 AUTO 模式下有意义：
+     * - [vlcTriedThisPlay]：这一轮已经试过 VLC。试过就不再切，避免 ExoPlayer↔VLC 乒乓；
+     * - [exoRetriedAfterVlc]：已经从 VLC 退回 ExoPlayer 了，这是最后一试，再失败就报错。
+     * 换台时两个都归零（新的一次播放，从头再来）。
      */
-    val preferVlcOnThisChip = remember {
-        val marks = listOf(
-            android.os.Build.HARDWARE, android.os.Build.BOARD, android.os.Build.DEVICE,
-        ).joinToString(" ").lowercase()
-        marks.contains("goke") || marks.contains("gk6323") || marks.contains("hikari")
-    }
+    var vlcTriedThisPlay by remember { mutableStateOf(false) }
+    var exoRetriedAfterVlc by remember { mutableStateOf(false) }
+
+    /**
+     * VLC 播失败后要回退的频道。非空表示「请用 ExoPlayer 再播一次」。
+     * 不能直接在 VLC 的错误回调里调 startEngine：局部函数在 lambda 里
+     * 只能引用它之前声明的东西，而 startEngine 定义在后面。
+     */
+    var exoFallbackRequest by remember { mutableStateOf<Channel?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -401,22 +405,42 @@ fun PlayerScreen(
     fun ensureVlc(): VlcEngine {
         vlcHolder.engine?.let { return it }
         val e = VlcEngine(context.applicationContext)
-        e.onStarted = { fatalError = null }
+        e.onStarted = {
+            fatalError = null
+            // VLC 真正出画面才算「它对这台有效」，记下来供 AUTO 下次直接用。
+            // 注意：不是「切到 VLC」就记，必须等 Vout 回调——这是唯一可信的成功信号。
+            val ch = current
+            val sid = activeId
+            if (ch != null && sid != null) repo.prefs.rememberEngine(sid, ch, PlayEngine.VLC)
+        }
         e.onError = { msg ->
             // 分清「引擎自己没起来」和「这条流播不动」：
             // 前者换台也没用，得看设置里的诊断；后者才是换台/换源。
             val engineBroken = msg.startsWith("VLC 引擎未就绪") || msg.startsWith("VLC 画面组件挂载失败")
-            fatalError = PlaybackIssue(
-                code = if (engineBroken) "VLC_INIT_FAILED" else "VLC_FAILED",
-                message = msg,
-                stage = PlaybackIssue.Stage.GAVE_UP,
-                attempt = 0,
-                hint = if (engineBroken) {
-                    "VLC 引擎没起来，这台机器先用 ExoPlayer；原因见「设置 → VLC 引擎」那一行"
-                } else {
-                    "ExoPlayer 和 VLC 都播不了这个台，多为地址失效或码流已损坏，建议换台或换源"
-                },
-            )
+            val ch = current
+            val sid = activeId
+            // AUTO 下 VLC 也不行：回 ExoPlayer 再试一次。只回一次，避免两个引擎乒乓。
+            // 引擎本身没起来（ABI/视图问题）就别回去了，换回去也一样播不了。
+            val canFallback = repo.prefs.playEngine == PlayEngine.AUTO &&
+                !engineBroken && !exoRetriedAfterVlc && ch != null
+            if (canFallback) {
+                exoRetriedAfterVlc = true
+                if (sid != null) repo.prefs.noteEngineFailure(sid, ch!!, PlayEngine.VLC)
+                toast = "VLC 也播不了，回 ExoPlayer 再试一次"
+                exoFallbackRequest = ch
+            } else {
+                fatalError = PlaybackIssue(
+                    code = if (engineBroken) "VLC_INIT_FAILED" else "VLC_FAILED",
+                    message = msg,
+                    stage = PlaybackIssue.Stage.GAVE_UP,
+                    attempt = 0,
+                    hint = if (engineBroken) {
+                        "VLC 引擎没起来，这台机器先用 ExoPlayer；原因见「设置 → VLC 引擎」那一行"
+                    } else {
+                        "ExoPlayer 和 VLC 都播不了这个台，多为地址失效或码流已损坏，建议换台或换源"
+                    },
+                )
+            }
         }
         vlcHolder.engine = e
         return e
@@ -471,24 +495,50 @@ fun PlayerScreen(
     }
 
     /**
+     * 执行「VLC 失败 → 回退 ExoPlayer」。放在 startEngine 之后才能引用它。
+     * 走状态中转只多一帧，换来的是在任何时候触发都能可靠执行。
+     */
+    LaunchedEffect(exoFallbackRequest) {
+        val ch = exoFallbackRequest ?: return@LaunchedEffect
+        exoFallbackRequest = null
+        startEngine(false, ch)
+    }
+
+    /**
      * 切换播放引擎并立即重开当前台。
      *
      * 必须真的重开——两个引擎各自持有解码器和音频输出，
      * 只改设置不切换的话，屏幕上是旧引擎的画面，用户会以为没生效。
+     *
+     * 手动选择会被记成这个台的引擎记忆：用户说哪个行，就按哪个来。
+     * 选「自动」则清掉记忆，让 AUTO 重新判断。
      */
     fun setPlayEngine(e: PlayEngine) {
         if (playEngine == e) return
         playEngine = e
         repo.prefs.playEngine = e
         val ch = current
+        val sid = activeId
         if (ch == null) {
             toast = "引擎：${e.label}"
             return
         }
-        val knownBad = activeId?.let {
-            repo.prefs.channelKey(ch) in repo.prefs.vlcOnlyChannels(it)
-        } == true
-        startEngine(e == PlayEngine.VLC || (e == PlayEngine.AUTO && knownBad), ch)
+        if (sid != null) {
+            if (e == PlayEngine.AUTO) {
+                repo.prefs.forgetEngine(sid, ch)
+            } else {
+                repo.prefs.rememberEngine(sid, ch, e)
+            }
+        }
+        // 手动切换是新的一轮试错，把 AUTO 的兜底轨迹归零
+        vlcTriedThisPlay = e == PlayEngine.VLC
+        exoRetriedAfterVlc = false
+        val wantVlc = when (e) {
+            PlayEngine.VLC -> true
+            PlayEngine.EXO -> false
+            PlayEngine.AUTO -> sid?.let { repo.prefs.engineOf(it, ch) } == PlayEngine.VLC
+        }
+        startEngine(wantVlc, ch)
         toast = "引擎：${e.label} · 已重新起播"
     }
 
@@ -522,16 +572,20 @@ fun PlayerScreen(
         // 换台提示：电视上原来换完台屏幕没有任何反馈，不知道切到第几台了
         osd = ChannelOsd(if (idx >= 0) idx + 1 else 0, ch)
 
-        // 引擎选择：强制 VLC；或 AUTO 模式下这个台以前在 ExoPlayer 上失败过，直接走 VLC；
-        // 或这台机器是国科微硬解（解 1080i 有先天缺陷），AUTO 也优先 VLC
+        // 引擎选择：强制 VLC / 强制 ExoPlayer 都照做；AUTO 先查这个台**成功过**的引擎
+        // （只记出过画面的，不记失败），没记忆就一律 ExoPlayer 先试——
+        // 它对 HLS 直播最稳、起播最快，VLC 只当兜底。
         val pref = repo.prefs.playEngine
-        val knownBad = sourceId != null &&
-            repo.prefs.channelKey(ch) in repo.prefs.vlcOnlyChannels(sourceId)
-        startEngine(
-            pref == PlayEngine.VLC ||
-                (pref == PlayEngine.AUTO && (knownBad || preferVlcOnThisChip)),
-            ch,
-        )
+        val remembered = sourceId?.let { repo.prefs.engineOf(it, ch) }
+        val wantVlc = when (pref) {
+            PlayEngine.VLC -> true
+            PlayEngine.EXO -> false
+            PlayEngine.AUTO -> remembered == PlayEngine.VLC
+        }
+        // 直接以 VLC 起播时，这一轮就算「VLC 已试过」，后面不能再切回 VLC
+        vlcTriedThisPlay = wantVlc
+        exoRetriedAfterVlc = false
+        startEngine(wantVlc, ch)
 
         // P3 预热：只预热同一分组内的下一个台。跨分组说明用户在跳组，不猜。
         // 3 秒去抖和失败静默都在 Warmer 里；这里算错了也只是少命中一次，不影响播放。
@@ -551,19 +605,28 @@ fun PlayerScreen(
                     toast = if (ev.code == "AUDIO_CODEC_UNSUPPORTED") ev.message else "卡顿 15 秒 · 自动重连中"
                 PlaybackIssue.Stage.GAVE_UP -> {
                     val ch = current
-                    // AUTO：ExoPlayer 试满 3 次还不行，且不是「地址根本打不开」这类
-                    // 换引擎也没用的问题，就自动改用 VLC 再来一次，并记住这个台。
+                    // AUTO：ExoPlayer 这轮还没试过 VLC、且不是「地址根本打不开」这类
+                    // 换引擎也没用的问题，就换 VLC 再试一次。
+                    // 只在这一轮内兜底，不写任何「这个台以后都用 VLC」的永久标记——
+                    // 那正是 0.5.2 把能播的台锁死在 VLC 上的原因。
                     val autoSwitch = repo.prefs.playEngine == PlayEngine.AUTO &&
-                        !usingVlc && ch != null && ev.switchEngineMayHelp
+                        !usingVlc && ch != null && ev.switchEngineMayHelp && !vlcTriedThisPlay
                     if (autoSwitch) {
-                        activeId?.let { repo.prefs.markVlcOnly(it, ch!!) }
-                        toast = "ExoPlayer 播不了（${ev.kind}），已自动改用 VLC"
+                        vlcTriedThisPlay = true
+                        toast = "ExoPlayer 播不了（${ev.kind}），改用 VLC 再试"
                         startEngine(true, ch!!)
                     } else {
                         fatalError = ev
                     }
                 }
             }
+        }
+        // ExoPlayer 真出画面 = 这个引擎对这个台有效，记下来供 AUTO 下次直接用
+        controller.onFirstFrame = {
+            val ch = current
+            val sid = activeId
+            if (ch != null && sid != null) repo.prefs.rememberEngine(sid, ch, PlayEngine.EXO)
+            fatalError = null
         }
     }
 
@@ -1154,13 +1217,31 @@ fun PlayerScreen(
                         }
                         // 一键换引擎：比让用户自己摸进设置里找「播放引擎」快得多，
                         // 也是这台机器上最可能真正解决问题的一步。
-                        if (!usingVlc && playEngine != PlayEngine.VLC) {
+                        if (usingVlc) {
+                            // VLC 也播不了时给个一键回头路。以前只能进设置里改，
+                            // 而设置里改完又会被旧的脏记忆拽回 VLC，等于没有退路。
                             TextButton(
                                 onClick = {
                                     val ch = current ?: return@TextButton
                                     fatalError = null
-                                    val sid = activeId
-                                    if (sid != null) repo.prefs.markVlcOnly(sid, ch)
+                                    // 用户明确选了 ExoPlayer，那就记住——下次 AUTO 别再把这个台
+                                    // 送回 VLC。ExoPlayer 若仍播不了，AUTO 的兜底还会再切 VLC。
+                                    activeId?.let { repo.prefs.rememberEngine(it, ch, PlayEngine.EXO) }
+                                    toast = "换回 ExoPlayer 试播"
+                                    startEngine(false, ch)
+                                },
+                                modifier = Modifier.padding(start = 10.dp),
+                            ) {
+                                Text("换回 ExoPlayer", fontSize = if (isTv) 16.sp else 14.sp)
+                            }
+                        } else if (playEngine != PlayEngine.VLC) {
+                            TextButton(
+                                onClick = {
+                                    val ch = current ?: return@TextButton
+                                    fatalError = null
+                                    // 不预写引擎记忆：等 VLC 真出画面，onStarted 会记下来。
+                                    // 这里只标「这一轮试过 VLC」，防止兜底再绕回来。
+                                    vlcTriedThisPlay = true
                                     toast = "改用 VLC 引擎试播"
                                     startEngine(true, ch)
                                 },

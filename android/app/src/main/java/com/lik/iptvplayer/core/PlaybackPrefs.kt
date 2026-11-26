@@ -30,8 +30,10 @@ enum class DecodeMode(val key: String, val label: String) {
  *   会直接报 ERROR_CODE_DECODER_INIT_FAILED 或卡死。
  * - [VLC]：libVLC。自带全套软解与容错，能播上述那些台；
  *   代价是内存占用更高，老盒子上纯软解 1080p 高码率会掉帧。
- * - [AUTO]：默认 ExoPlayer；某个台连试 3 次失败，自动改用 VLC 重来一次，
- *   并记住这个台以后直接走 VLC。用户不用自己判断，坏台自己会好。
+ * - [AUTO]：默认 ExoPlayer（它对 HLS 直播最稳、起播最快）；6 秒没出画面、
+ *   或解码器报错，自动改用 VLC 再试；VLC 也失败会退回 ExoPlayer 重试一次。
+ *   哪个引擎真正放出画面就记住哪个，下次这个台直接用记的那个。
+ *   手动切过引擎也会被记下——用户的选择优先于自动判断。
  */
 enum class PlayEngine(val key: String, val label: String) {
     AUTO("auto", "自动"),
@@ -108,22 +110,95 @@ class PlaybackPrefs(context: Context) {
         set(v) = prefs.edit().putString(KEY_PLAY_ENGINE, v.key).apply()
 
     /**
-     * 在 ExoPlayer 上失败过、已改走 VLC 的台。
-     * 记的是频道的稳定引用（见 [channelKey]），订阅换序也不会认错。
-     * AUTO 模式下先查这里，命中就直接用 VLC 起播，省掉那 3 次无谓重试。
+     * 每个频道**真正出过画面**的引擎。
+     *
+     * 0.5.0～0.5.2 记的是「在 ExoPlayer 上失败过」——这是个单向、永久的判决：
+     * 网络抖动一次就把台判给 VLC，而当时根本没验证 VLC 能不能播；用户手动切回
+     * ExoPlayer 也不改这个标记，于是下次又送回 VLC，来回死循环。
+     *
+     * 现在改成只记成功：谁把画面放出来了，就记谁。失败不写记忆，只做计数，
+     * 连续两次失败才清掉旧记忆重新试——宁可多试一次，也不能把能播的台锁死。
      */
-    fun vlcOnlyChannels(sourceId: String): Set<String> =
-        prefs.getStringSet("vlc_only_$sourceId", null)?.toSet() ?: emptySet()
-
-    fun markVlcOnly(sourceId: String, channel: Channel) {
-        val next = vlcOnlyChannels(sourceId).toMutableSet()
-        if (next.add(channelKey(channel))) {
-            prefs.edit().putStringSet("vlc_only_$sourceId", next).apply()
-        }
+    fun engineOf(sourceId: String, channel: Channel): PlayEngine? {
+        val key = channelKey(channel)
+        return engineMemo(sourceId).firstOrNull { it.startsWith("$key\t") }
+            ?.substringAfter('\t')
+            ?.let { PlayEngine.of(it) }
+            ?.takeIf { it != PlayEngine.AUTO }
     }
 
-    fun clearVlcOnly(sourceId: String) {
-        prefs.edit().remove("vlc_only_$sourceId").apply()
+    /** 记录一次成功（出过画面）。只在真有画面的回调里调用。 */
+    fun rememberEngine(sourceId: String, channel: Channel, engine: PlayEngine) {
+        if (engine == PlayEngine.AUTO) return
+        val key = channelKey(channel)
+        val next = engineMemo(sourceId).filterNot { it.startsWith("$key\t") }.toMutableSet()
+        next.add("$key\t${engine.key}")
+        prefs.edit().putStringSet(memoKey(sourceId), next).apply()
+        // 有成功记录，失败计数从头算
+        clearFailCount(sourceId, key, engine)
+    }
+
+    /** 主动忘掉某个台的引擎记忆（用户把引擎切回「自动」时用）。 */
+    fun forgetEngine(sourceId: String, channel: Channel) {
+        val key = channelKey(channel)
+        val next = engineMemo(sourceId).filterNot { it.startsWith("$key\t") }.toSet()
+        prefs.edit().putStringSet(memoKey(sourceId), next).apply()
+        for (e in PlayEngine.entries) clearFailCount(sourceId, key, e)
+    }
+
+    /**
+     * 记一次失败。同一频道 + 同一引擎连续失败 [ENGINE_FAIL_LIMIT] 次，
+     * 说明这条记忆不可信，直接删掉，下次 AUTO 回到 ExoPlayer 重新试。
+     */
+    fun noteEngineFailure(sourceId: String, channel: Channel, engine: PlayEngine) {
+        if (engine == PlayEngine.AUTO) return
+        val key = channelKey(channel)
+        val n = failCount(sourceId, key, engine) + 1
+        if (n >= ENGINE_FAIL_LIMIT) {
+            forgetEngine(sourceId, channel)
+            return
+        }
+        val all = failSet(sourceId).filterNot { it.startsWith("$key\t${engine.key}\t") }.toMutableSet()
+        all.add("$key\t${engine.key}\t$n")
+        prefs.edit().putStringSet(failKey(sourceId), all).apply()
+    }
+
+    private fun engineMemo(sourceId: String): Set<String> =
+        prefs.getStringSet(memoKey(sourceId), null)?.toSet() ?: emptySet()
+
+    private fun failSet(sourceId: String): Set<String> =
+        prefs.getStringSet(failKey(sourceId), null)?.toSet() ?: emptySet()
+
+    private fun failCount(sourceId: String, key: String, engine: PlayEngine): Int =
+        failSet(sourceId).firstOrNull { it.startsWith("$key\t${engine.key}\t") }
+            ?.substringAfterLast('\t')?.toIntOrNull() ?: 0
+
+    private fun clearFailCount(sourceId: String, key: String, engine: PlayEngine) {
+        val all = failSet(sourceId)
+        val next = all.filterNot { it.startsWith("$key\t${engine.key}\t") }.toSet()
+        if (next.size != all.size) prefs.edit().putStringSet(failKey(sourceId), next).apply()
+    }
+
+    private fun memoKey(sourceId: String) = "engine_ok_$sourceId"
+    private fun failKey(sourceId: String) = "engine_fail_$sourceId"
+
+    /**
+     * 清掉 0.5.2 及更早版本留下的 `vlc_only_*` 脏数据。
+     *
+     * 那批数据是「ExoPlayer 失败过一次」就算数，没有任何成功验证，留着只会
+     * 继续把能播的台往 VLC 上推。升级时一次性清空，让 AUTO 从头学一遍。
+     * 用独立 flag 保证只跑一次。
+     */
+    private fun migrateLegacyVlcOnly() {
+        if (prefs.getBoolean(KEY_MIGRATED_ENGINE, false)) return
+        val stale = prefs.all.keys.filter { it.startsWith("vlc_only_") }
+        val edit = prefs.edit()
+        stale.forEach { edit.remove(it) }
+        edit.putBoolean(KEY_MIGRATED_ENGINE, true).apply()
+    }
+
+    init {
+        migrateLegacyVlcOnly()
     }
 
     /**
@@ -156,5 +231,9 @@ class PlaybackPrefs(context: Context) {
         const val KEY_UP_NEXT = "key_up_next"
         const val KEY_UPDATE_URL = "update_url"
         const val KEY_LAST_SEEN = "last_seen_version"
+        const val KEY_MIGRATED_ENGINE = "migrated_engine_memo_v1"
+
+        /** 同一频道 + 同一引擎连败几次就认定记忆失效。2 次即清，别让脏记忆长期生效。 */
+        const val ENGINE_FAIL_LIMIT = 2
     }
 }
