@@ -1,6 +1,6 @@
 {
-  "versionCode": 24,
-  "versionName": "0.4.10",
-  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.4.10/iptv-player-0.4.10.apk",
-  "notes": "修复老 Android 设备点检查更新报 Unacceptable certificate 的问题：内置 TrustAsia 根证书兜底，不再依赖系统信任库，在线更新恢复可用。"
+  "versionCode": 25,
+  "versionName": "0.4.11",
+  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.4.11/iptv-player-0.4.11.apk",
+  "notes": "修复老 Android 设备（Android 7-9 运营商盒子）检查更新报 Unacceptable certificate：改用自签名根 Certum Trusted Network CA，走标准 PKIX 校验路径，并合并系统信任库；设置页新增“证书兜底”诊断行。"
 }
