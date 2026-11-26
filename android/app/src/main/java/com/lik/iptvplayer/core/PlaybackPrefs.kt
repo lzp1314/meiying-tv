@@ -37,12 +37,41 @@ class PlaybackPrefs(context: Context) {
         get() = prefs.getString(KEY_LAST_SOURCE, null)?.ifBlank { null }
         set(v) = prefs.edit().putString(KEY_LAST_SOURCE, v).apply()
 
-    /** 频道 id 只在单个源内唯一（ch-1 每个源都有），所以按源分别记。 */
+    /**
+     * 上次看的频道。按源分别记，因为 ch-1 这种 id 每个源都有。
+     *
+     * 早期存的是 `ch-N` 序号，而序号由 M3U 顺序生成——订阅一换顺序就串台。
+     * 现在存稳定引用（流地址主干 > tvgId > 名称），读取时用同样的规则回找。
+     */
     fun lastChannel(sourceId: String): String? =
         prefs.getString("last_ch_$sourceId", null)?.ifBlank { null }
 
-    fun setLastChannel(sourceId: String, channelId: String) {
-        prefs.edit().putString("last_ch_$sourceId", channelId).apply()
+    fun setLastChannel(sourceId: String, channel: Channel) {
+        prefs.edit().putString("last_ch_$sourceId", channelKey(channel)).apply()
+    }
+
+    /** 频道的稳定身份：流地址去掉鉴权参数，其次 tvgId，最后名称。 */
+    fun channelKey(ch: Channel): String {
+        val urlKey = ch.url.substringBefore('?').trim()
+        if (urlKey.isNotEmpty()) return "url:$urlKey"
+        if (ch.tvgId.isNotBlank()) return "tvg:${ch.tvgId}"
+        return "name:${ch.name}"
+    }
+
+    /**
+     * 从频道列表里找回上次看的台。
+     * 先按稳定引用精确匹配，再按 tvgId / 名称兜底，最后兼容旧版存的 `ch-N` 序号。
+     */
+    fun findLastChannel(sourceId: String, channels: List<Channel>): Channel? {
+        val ref = lastChannel(sourceId) ?: return null
+        val exact = channels.firstOrNull { channelKey(it) == ref }
+        if (exact != null) return exact
+        val byTvg = channels.firstOrNull { it.tvgId.isNotBlank() && "tvg:${it.tvgId}" == ref }
+        if (byTvg != null) return byTvg
+        val byName = channels.firstOrNull { "name:${it.name}" == ref }
+        if (byName != null) return byName
+        // 旧数据：ch-N 序号
+        return channels.firstOrNull { it.id == ref }
     }
 
     /** 解码方式：重启、覆盖安装都保留，用户不用每次重设。 */

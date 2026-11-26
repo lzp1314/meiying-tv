@@ -15,6 +15,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -127,6 +128,20 @@ internal val ChRowBg = Color(0x5916223A)
 internal val ChRowActive = Color(0x9916304F)
 internal val TextDim = Color(0xFF94A3B8)
 internal val Accent = Color(0xFF38BDF8)
+
+/** 聚焦时的醒目描边色：比纯背景高亮更容易在电视上辨认光标位置。 */
+internal val FocusRing = Color(0xFF60A5FA)
+
+/**
+ * 电视端统一焦点描边：聚焦时加一圈亮蓝边 + 轻微提亮背景。
+ * 只描边不改布局尺寸，避免焦点在列表里跳动。
+ */
+internal fun Modifier.focusRing(focused: Boolean, shape: RoundedCornerShape): Modifier =
+    this.border(
+        width = if (focused) 2.dp else 0.dp,
+        color = if (focused) FocusRing else Color.Transparent,
+        shape = shape,
+    )
 
 /**
  * 手机端与 TV 端共用的播放外壳。
@@ -339,7 +354,7 @@ fun PlayerScreen(
         paused = false
         if (sourceId != null) {
             repo.markUsed(sourceId)
-            repo.prefs.setLastChannel(sourceId, ch.id)
+            repo.prefs.setLastChannel(sourceId, ch)
         }
         // 固定一份列表快照：序号和「下一个台」都从它算，避免两次读到不同状态
         val list = result?.channels.orEmpty()
@@ -378,8 +393,8 @@ fun PlayerScreen(
     }
 
     fun startPlayback(r: RefreshResult) {
-        val last = repo.prefs.lastChannel(r.sourceId)
-        val ch = r.channels.firstOrNull { it.id == last } ?: r.channels.firstOrNull()
+        // 用稳定引用找回上次的台；找不到才回退第一个（旧版按 ch-序号找，换序就串台）
+        val ch = repo.prefs.findLastChannel(r.sourceId, r.channels) ?: r.channels.firstOrNull()
         if (ch != null) playChannel(ch, r.sourceId)
     }
 
@@ -1485,6 +1500,7 @@ internal fun DrawScope.drawGear(color: Color, holeColor: Color) {
 @Composable
 internal fun ModeChip(label: String, selected: Boolean, isTv: Boolean, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(999.dp)
     Text(
         label,
         color = when {
@@ -1496,7 +1512,7 @@ internal fun ModeChip(label: String, selected: Boolean, isTv: Boolean, onClick: 
         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
         modifier = Modifier
             .padding(end = 6.dp)
-            .clip(RoundedCornerShape(999.dp))
+            .clip(shape)
             .background(
                 when {
                     selected -> Accent
@@ -1504,6 +1520,7 @@ internal fun ModeChip(label: String, selected: Boolean, isTv: Boolean, onClick: 
                     else -> Color(0x3316223A)
                 },
             )
+            .focusRing(focused, shape)
             .onFocusChanged { focused = it.isFocused }
             .focusable()
             .clickable { onClick() }
@@ -1548,10 +1565,12 @@ internal fun SourceRow(
         isActive -> RowActive
         else -> RowBg
     }
+    val rowShape = RoundedCornerShape(10.dp)
+    val chipShape = RoundedCornerShape(6.dp)
     val focusMod = if (tvFocusable) Modifier.focusable() else Modifier
     Row(
         Modifier.fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(rowShape)
             .background(bg)
             .padding(start = 12.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1559,8 +1578,9 @@ internal fun SourceRow(
         // 控件 1：源名（点=切换）
         Column(
             Modifier.weight(1f)
-                .clip(RoundedCornerShape(6.dp))
+                .clip(chipShape)
                 .onFocusChanged { nameFocused = it.isFocused }
+                .focusRing(nameFocused && tvFocusable, chipShape)
                 .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
                 .then(focusMod)
                 .clickable { onSwitch() }
@@ -1587,8 +1607,9 @@ internal fun SourceRow(
         Spacer(Modifier.width(6.dp))
         // 控件 2：编辑
         Box(
-            Modifier.clip(RoundedCornerShape(6.dp))
+            Modifier.clip(chipShape)
                 .background(if (editFocused) Color(0x33FFFFFF) else Color.Transparent)
+                .focusRing(editFocused && tvFocusable, chipShape)
                 .onFocusChanged { editFocused = it.isFocused }
                 .then(focusMod)
                 .clickable { onEdit() }
@@ -1597,8 +1618,9 @@ internal fun SourceRow(
         Spacer(Modifier.width(4.dp))
         // 控件 3：锁定 / 解锁
         Box(
-            Modifier.clip(RoundedCornerShape(6.dp))
+            Modifier.clip(chipShape)
                 .background(if (lockFocused) Color(0x33FFFFFF) else Color.Transparent)
+                .focusRing(lockFocused && tvFocusable, chipShape)
                 .onFocusChanged { lockFocused = it.isFocused }
                 .then(focusMod)
                 .clickable { onLock() }

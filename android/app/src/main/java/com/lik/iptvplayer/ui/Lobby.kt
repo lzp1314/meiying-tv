@@ -41,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
@@ -131,17 +132,15 @@ internal fun LobbyPanel(
     onClose: () -> Unit,
 ) {
     val navFocus = remember { LobbyTab.entries.map { FocusRequester() }.toList() }
-    // 首次进入和每次切页都把焦点落到导航上：否则焦点留在刚消失的列表里，
-    // 遥控器就「按了没反应」。
-    LaunchedEffect(isTv) {
+    // 只在「侧栏刚打开」时把焦点落到当前页导航项，让方向键一进来就有落点。
+    //
+    // 关键：切页之后不再用 LaunchedEffect(tab) 把焦点拉回导航项。此前那套
+    // 「焦点到导航项→切页→tab 变化→又把焦点拉回导航项」是双向驱动，真机上会
+    // 抢焦点：用户从频道按到信号源，焦点被Effect拽回，页面就不跟着换了。
+    // 现在切页只有「导航项 onFocusChanged」一个真相源，焦点到哪就显示哪页，
+    // 用户往下按到信号源，焦点停在那，页面必然跟着切。
+    LaunchedEffect(isTv, navFocusTrigger) {
         if (!isTv) return@LaunchedEffect
-        // 侧栏刚打开：焦点落到「当前页」的导航项（第四点），别让方向键在没焦点的界面里乱跳
-        runCatching { navFocus[tab.ordinal].requestFocus() }
-    }
-    LaunchedEffect(tab, navFocusTrigger) {
-        if (!isTv) return@LaunchedEffect
-        // 切页后、或左键回导航时，把焦点明确带回当前页的导航项。
-        // 焦点由 tab 驱动，而不是反过来——这样「焦点到哪」和「显示哪页」永远一致。
         runCatching { navFocus[tab.ordinal].requestFocus() }
     }
 
@@ -236,14 +235,18 @@ private fun NavRail(
             fontWeight = FontWeight.Medium,
             modifier = Modifier.fillMaxWidth().padding(start = 26.dp, bottom = 18.dp),
         )
-        LobbyTab.entries.forEach { t ->
+        LobbyTab.entries.forEachIndexed { i, t ->
             NavItem(
                 tab = t,
                 isTv = isTv,
                 selected = t == current,
                 focusRequester = focusRequests[t.ordinal],
-                // 焦点一到就切页（第五点）：遥控器上下移到「信号源」，右边内容立刻跟着换，
-                // 不再需要按 OK 确认。这是切页的唯一真相源，按键桥不参与，避免两套机制打架。
+                // 显式指定上下焦点：默认 2D 搜索会把「频道→信号源」的下一站算到右边内容区，
+                // 导致按下键跳不出导航。绑成环形，三个导航项之间上下一定能走到。
+                upRequester = focusRequests[(i - 1 + LobbyTab.entries.size) % LobbyTab.entries.size],
+                downRequester = focusRequests[(i + 1) % LobbyTab.entries.size],
+                // 焦点一到就切页：遥控器上下移到「信号源」，右边内容立刻跟着换，
+                // 不再需要按 OK 确认。这是切页的唯一真相源，没有第二套机制抢焦点。
                 onFocused = { if (isTv) onTab(t) },
                 onClick = { onTab(t) },
             )
@@ -273,6 +276,8 @@ private fun NavItem(
     isTv: Boolean,
     selected: Boolean,
     focusRequester: FocusRequester,
+    upRequester: FocusRequester? = null,
+    downRequester: FocusRequester? = null,
     onFocused: () -> Unit,
     onClick: () -> Unit,
 ) {
@@ -299,6 +304,10 @@ private fun NavItem(
             }
             .focusRequester(focusRequester)
             .then(if (isTv) Modifier.focusable() else Modifier)
+            .focusProperties {
+                if (upRequester != null) up = upRequester
+                if (downRequester != null) down = downRequester
+            }
             .clickable { onClick() }
             .padding(horizontal = if (isTv) 16.dp else 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -520,10 +529,11 @@ private fun RailItem(
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(8.dp)
     Row(
         Modifier.fillMaxWidth()
             .height(46.dp)
-            .clip(RoundedCornerShape(8.dp))
+            .clip(shape)
             .background(
                 when {
                     focused -> NavFocusBg
@@ -531,6 +541,7 @@ private fun RailItem(
                     else -> Color.Transparent
                 },
             )
+            .focusRing(focused, shape)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .onFocusChanged { focused = it.isFocused }
             .focusable()
@@ -579,10 +590,11 @@ private fun LobbyChannelRow(
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(8.dp)
     Row(
         modifier.fillMaxWidth()
             .height(56.dp)
-            .clip(RoundedCornerShape(8.dp))
+            .clip(shape)
             .background(
                 when {
                     focused -> RowFocus
@@ -590,6 +602,7 @@ private fun LobbyChannelRow(
                     else -> Color.Transparent
                 },
             )
+            .focusRing(focused, shape)
             .onFocusChanged { focused = it.isFocused }
             .focusable()
             .onKeyEvent { e ->
@@ -919,29 +932,27 @@ private fun SettingsPage(
                 ModeChip("上 = 上一台", !keyUpNext, isTv = isTv) { onKeyUpNext(false) }
             }
         }
+        // 解码信息 / 错误码只在诊断时看，不单独占焦点位——纯文字跟随相邻项滚动即可。
+        // 焦点点越少，遥控器上下翻页越顺，不会被「只看不按」的诊断文字打断。
         if (decoder.isNotBlank()) {
             item {
                 val soft = decoder.startsWith("c2.android.") || decoder.startsWith("OMX.google.")
-                FocusableBlock {
-                    Text(
-                        "解码：$decoder（${if (soft) "软解，会掉帧" else "硬解"}）",
-                        color = if (soft) Color(0xFFF87171) else Color(0xFF4ADE80),
-                        fontSize = 12.sp,
-                    )
-                }
+                Text(
+                    "解码：$decoder（${if (soft) "软解，会掉帧" else "硬解"}）",
+                    color = if (soft) Color(0xFFF87171) else Color(0xFF4ADE80),
+                    fontSize = 12.sp,
+                )
             }
         }
         // 最近一次错误码常驻：下次卡住能直接看出是 ERROR_CODE_IO_* 还是解码器问题
         if (errorCode.isNotBlank()) {
             item {
                 val decoderIssue = errorCode.contains("DECODER", ignoreCase = true)
-                FocusableBlock {
-                    Text(
-                        "最近错误：$errorCode（${if (decoderIssue) "解码器" else "多为网络/源"}）",
-                        color = Color(0xFFFCA5A5),
-                        fontSize = 12.sp,
-                    )
-                }
+                Text(
+                    "最近错误：$errorCode（${if (decoderIssue) "解码器" else "多为网络/源"}）",
+                    color = Color(0xFFFCA5A5),
+                    fontSize = 12.sp,
+                )
             }
         }
         item {
@@ -1006,10 +1017,12 @@ private fun LabeledRow(label: String, content: @Composable () -> Unit) {
 @Composable
 private fun FocusableBlock(content: @Composable () -> Unit) {
     var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(8.dp)
     Box(
         Modifier.fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+            .clip(shape)
             .background(if (focused) Color(0x332563EB) else Color.Transparent)
+            .focusRing(focused, shape)
             .onFocusChanged { focused = it.isFocused }
             .focusable()
             .padding(horizontal = 6.dp, vertical = 3.dp),

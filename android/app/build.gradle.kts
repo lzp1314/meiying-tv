@@ -15,8 +15,8 @@ android {
         targetSdk = 36
         // 覆盖安装（升级）必须递增 versionCode；包名与签名不变时
         // SharedPreferences（源列表、锁定、上次频道）会自动保留
-        versionCode = 22
-        versionName = "0.4.8"
+        versionCode = 23
+        versionName = "0.4.9"
     }
 
     buildTypes {
