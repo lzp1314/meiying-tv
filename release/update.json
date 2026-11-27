@@ -1,10 +1,10 @@
 {
-  "versionCode": 34,
-  "versionName": "0.5.8",
-  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.8/iptv-player-0.5.8.apk",
+  "versionCode": 35,
+  "versionName": "0.5.9",
+  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.9/iptv-player-0.5.9.apk",
   "apkFallback": [
-    "https://github.com/lzp1314/meiying-tv/releases/download/v0.5.8/iptv-player-0.5.8.apk"
+    "https://github.com/lzp1314/meiying-tv/releases/download/v0.5.9/iptv-player-0.5.9.apk"
   ],
-  "sha256": "691e572e12801b78dbf01d498d1dd4f53c1df0c3fc7ea11bffe7019a9dd1c3c0",
-  "notes": "1) 修复设置页遥控器焦点：卡片外壳不再抢焦点，方向键直达「下载并安装」按钮，按 OK 生效。\\n2) 修复换台后左下角台标+时间一直显示：收起计时与台标加载解耦，3 秒准时消失。\\n3) 设置页新增「刷新节目单」按钮：只重拉 EPG 不重下订阅，填入的节目单地址改动后最快生效，不打断正在看的台。"
+  "sha256": "78f494ab2142dedde80327609faf6f3797dc33025946e8f3ecc469fc6f96ac73",
+  "notes": "1) 删除播放画面左下角常驻信息栏（频道名/当前节目/接下来一直显示的真凶）。\\n2) 换台提示精简为台名+当前节目闪3秒，去掉台标方块、清晰度、接下来三行。\\n3) 移除无用的台标网络加载，画面更干净。注：左上CCTV台标是直播信号自带水印，App无法去除。"
 }
