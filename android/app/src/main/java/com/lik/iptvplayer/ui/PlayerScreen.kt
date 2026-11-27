@@ -9,6 +9,7 @@ import android.provider.Settings
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -87,6 +88,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.session.MediaSession
 import androidx.media3.ui.PlayerView
 import com.lik.iptvplayer.core.Channel
 import com.lik.iptvplayer.core.DecodeMode
@@ -102,6 +104,7 @@ import com.lik.iptvplayer.player.PlaybackIssue
 import com.lik.iptvplayer.player.PlayerController
 import com.lik.iptvplayer.player.VlcEngine
 import com.lik.iptvplayer.player.Warmer
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -221,6 +224,33 @@ fun PlayerScreen(
      */
     var exoFallbackRequest by remember { mutableStateOf<Channel?>(null) }
 
+    // 0.6.0 防屏保 ①：向系统注册 MediaSession。
+    // Android TV 靠 MediaSession 判定「用户是否在看视频」；缺了它，画面一卡顿
+    // 系统就以为没在播，弹屏保并把 Activity 推后台。绑定 ExoPlayer 后，播放状态
+    // 由 player 自动上报（含 buffering 期间 playWhenReady 的语义）。
+    val mediaSession = remember {
+        runCatching {
+            MediaSession.Builder(context, controller.player)
+                .setId("meiying_tv_player")
+                .build()
+        }.getOrNull()
+    }
+    DisposableEffect(Unit) {
+        onDispose { mediaSession?.release() }
+    }
+
+    // 0.6.0 防屏保 ②：在 Window 级加 FLAG_KEEP_SCREEN_ON。
+    // Google 官方文档明确：设置该标志即可禁用 ambient mode（TV 屏保）。
+    // 此前只有 View 层的 keepScreenOn（PlayerView/VLCVideoLayout），强度不够——
+    // 播放卡顿、视图短暂不可见时就失效。Window 级不受视图状态影响。
+    DisposableEffect(context) {
+        val window = (context as? android.app.Activity)?.window
+        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
     DisposableEffect(Unit) {
         onDispose {
             Warmer.schedule(null)
@@ -232,22 +262,55 @@ fun PlayerScreen(
 
     // 暂停状态：OK / 双击 / 退后台都会改它；换台时重置为播放
     var paused by remember { mutableStateOf(false) }
+    // 0.6.0：区分暂停来源。true = 退后台自动暂停（回来要自动续播）；
+    // false = 用户按 OK 主动暂停（回来保持暂停，不能自作主张续播）。
+    var pauseByBackground by remember { mutableStateOf(false) }
+    var stopPauseJob by remember { mutableStateOf<Job?>(null) }
 
-    // 退到后台（按 Home、切应用、锁屏）立即停播，避免手机退出后声音还在响。
-    // 官方规范：播放器所在 Activity 进 onStop 就该停；这里只 pause 不 release，
-    // 回到前台画面还在、按一次 OK 就能续播。看门狗由 controller.pause() 一并撤销。
+    // 退到后台的暂停：延迟 900ms 执行，且回来自动续播。
+    //
+    // 0.6.0 防屏保 ③：旧写法 ON_STOP 立即 pause，且回来不自动恢复。
+    // 电视屏保（含雷鸟的视频屏保）会把 Activity 短暂推到后台再回来——
+    // 这一来一回就触发「暂停且需要按 OK 才续播」，用户看到的就是"卡顿一下就停了"。
+    // 现在：
+    // - ON_STOP 先取消上一次的待执行暂停，起 900ms 延迟；屏保/切焦的短抖动
+    //   在 900ms 内回来，ON_START 直接取消，播放根本没停；
+    // - 真按 Home 离开超过 900ms，照常暂停（后台不响，符合官方规范）；
+    // - 回来时若确实是后台暂停的，自动续播，不用按 OK。
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, controller) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) {
-                Warmer.schedule(null)   // 退后台：别在用户看不见时发预热请求
-                controller.pause()
-                vlcHolder.engine?.pause()
-                paused = true
+            when (event) {
+                Lifecycle.Event.ON_STOP -> {
+                    Warmer.schedule(null)   // 退后台：别在用户看不见时发预热请求
+                    stopPauseJob?.cancel()
+                    stopPauseJob = scope.launch {
+                        delay(900)
+                        controller.pause()
+                        vlcHolder.engine?.pause()
+                        paused = true
+                        pauseByBackground = true
+                    }
+                }
+                Lifecycle.Event.ON_START -> {
+                    // 回到前台：先撤销还没到点的暂停（屏保短抖动场景）
+                    stopPauseJob?.cancel()
+                    stopPauseJob = null
+                    // 已经是后台暂停的（离开超过 900ms），自动续播
+                    if (pauseByBackground) {
+                        if (usingVlc) vlcHolder.engine?.resume() else controller.resume()
+                        paused = false
+                        pauseByBackground = false
+                    }
+                }
+                else -> Unit
             }
         }
         (lifecycleOwner as? LifecycleOwner)?.lifecycle?.addObserver(observer)
-        onDispose { (lifecycleOwner as? LifecycleOwner)?.lifecycle?.removeObserver(observer) }
+        onDispose {
+            (lifecycleOwner as? LifecycleOwner)?.lifecycle?.removeObserver(observer)
+            stopPauseJob?.cancel()
+        }
     }
 
     // 实际启用的解码器。老盒子上「画面一顿一顿」多半是走了软解，
@@ -549,6 +612,7 @@ fun PlayerScreen(
     /** 播放/暂停切换：直播暂停是停在同一帧，恢复即继续，不需要重新拉流。 */
     fun togglePause() {
         if (current == null) return
+        pauseByBackground = false   // 手动操作：明确不是后台暂停，回来不自动续播
         if (paused) {
             if (usingVlc) vlcHolder.engine?.resume() else controller.resume()
             paused = false
@@ -566,6 +630,7 @@ fun PlayerScreen(
         fatalError = null
         // 换台一定从播放态起播，不继承上一台的暂停状态
         paused = false
+        pauseByBackground = false
         if (sourceId != null) {
             repo.markUsed(sourceId)
             repo.prefs.setLastChannel(sourceId, ch)
@@ -2051,26 +2116,35 @@ internal fun DrawScope.drawGear(color: Color, holeColor: Color) {
 internal fun ModeChip(label: String, selected: Boolean, isTv: Boolean, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(999.dp)
+    // 0.6.0：焦点态必须排在选中态之前。旧写法 selected 优先级最高，
+    // 选中项（如「硬解」）拿到焦点时背景仍是亮青 Accent，焦点环又是浅蓝画在亮青上，
+    // 遥控器移到它上面几乎看不出变化——用户以为"没按到"。
+    // 现在：选中+焦点 = 近白底 + 深青描边（一眼可见），未选中+焦点 = 蓝底白字。
+    val bg = when {
+        focused && selected -> Color(0xFFE0F2FE)
+        focused -> RowFocus
+        selected -> Accent
+        else -> Color(0x3316223A)
+    }
+    val fg = when {
+        selected -> Color(0xFF0B1220)
+        focused -> Color.White
+        else -> TextDim
+    }
     Text(
         label,
-        color = when {
-            selected -> Color(0xFF0B1220)
-            focused -> Color.White
-            else -> TextDim
-        },
+        color = fg,
         fontSize = if (isTv) 14.sp else 12.sp,
         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
         modifier = Modifier
             .padding(end = 6.dp)
             .clip(shape)
-            .background(
-                when {
-                    selected -> Accent
-                    focused -> RowFocus
-                    else -> Color(0x3316223A)
-                },
+            .background(bg)
+            .border(
+                width = if (focused) 3.dp else 0.dp,
+                color = if (focused) Color(0xFF0284C7) else Color.Transparent,
+                shape = shape,
             )
-            .focusRing(focused, shape)
             .onFocusChanged { focused = it.isFocused }
             .focusable()
             .clickable { onClick() }

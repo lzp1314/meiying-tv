@@ -494,6 +494,10 @@ private fun ChannelPage(
                         selected = category == ALL,
                         focusRequester = if (blocks.size <= 1) catFocus else null,
                         onRight = { requestFocus(chFocus) },
+                        // 0.6.0：焦点到分类就切换右侧列表，不用再按 OK。
+                        // 一级导航（频道/信号源/设置）早就是这套逻辑，二级分类栏之前
+                        // 只把切换绑在 onClick 上，所以「按到第二组还要按确认」。
+                        onFocused = { category = ALL },
                         onClick = { category = ALL },
                     )
                 }
@@ -502,6 +506,7 @@ private fun ChannelPage(
                         text = g.name,
                         selected = category == g.name,
                         onRight = { requestFocus(chFocus) },
+                        onFocused = { category = g.name },
                         onClick = { category = g.name },
                     )
                 }
@@ -584,6 +589,7 @@ private fun RailItem(
     selected: Boolean,
     focusRequester: FocusRequester? = null,
     onRight: () -> Boolean,
+    onFocused: () -> Unit = {},
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -601,7 +607,13 @@ private fun RailItem(
             )
             .focusRing(focused, shape)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .onFocusChanged { focused = it.isFocused }
+            .onFocusChanged {
+                focused = it.isFocused
+                // 焦点一到就回调（分类栏据此切换右侧频道列表，不用按 OK）。
+                // 信号源栏不传 onFocused，仍是按 OK 才切源——避免上下移动焦点
+                // 就误切源、重新拉流。
+                if (it.isFocused) onFocused()
+            }
             // 只留 clickable 一个焦点节点。原来这里还叠了 focusable()，
             // 焦点到底落在哪个节点不确定，onFocusChanged 因此时灵时不灵。
             .onPreviewKeyEvent { e ->

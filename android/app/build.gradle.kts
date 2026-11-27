@@ -15,8 +15,8 @@ android {
         targetSdk = 36
         // 覆盖安装（升级）必须递增 versionCode；包名与签名不变时
         // SharedPreferences（源列表、锁定、上次频道）会自动保留
-        versionCode = 35
-        versionName = "0.5.9"
+        versionCode = 36
+        versionName = "0.6.0"
 
         ndk {
             // libVLC 每个 ABI 的 .so 就有 38–50MB，四种全带会让 APK 破百兆。
@@ -66,6 +66,11 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-hls:$media3")
     implementation("androidx.media3:media3-ui:$media3")
     implementation("androidx.media3:media3-datasource-okhttp:$media3")
+    // 0.6.0：向 Android TV 上报「正在播放」状态。系统靠 MediaSession 判定
+    // 用户是否在看视频——缺了它，画面一卡顿系统就以为没在播，弹屏保、把 Activity
+    // 推到后台，进而触发我们自己的 ON_STOP 暂停。视频卡顿期间的 buffering
+    // 仍保持 STATE_PLAYING，不让系统误判。
+    implementation("androidx.media3:media3-session:$media3")
 
     // 手机与 TV 共用一套 Compose，TV 侧自行管理 D-pad 焦点，不依赖不稳定版 tv-material
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
