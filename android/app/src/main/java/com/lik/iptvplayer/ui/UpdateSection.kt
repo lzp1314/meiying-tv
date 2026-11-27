@@ -23,7 +23,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -61,6 +64,10 @@ internal fun UpdateSection(
     var certStatus by remember { mutableStateOf(Trust.status) }
     // 这次清单是从哪个地址拿到的。多镜像之后必须能看到这个，否则出问题只能靠猜
     var lastSource by remember { mutableStateOf("") }
+    // 焦点锚点。TV 端必须始终有个可聚焦节点：一旦焦点节点被移除（按钮禁用、
+    // 或「以后再说」把整块收起），系统会把焦点甩给侧栏第一个导航项（频道），
+    // 而导航是「焦点到即切页」，表现就是「按了检查更新却跳到频道界面」。
+    val checkFocus = remember { FocusRequester() }
 
     val labelSize = if (isTv) 15.sp else 13.sp
     val bodySize = if (isTv) 13.sp else 11.sp
@@ -154,7 +161,13 @@ internal fun UpdateSection(
         }
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Button(onClick = { check() }, enabled = !busy) {
+            // 绝不能用 enabled = !busy：TV 端一禁用，按钮立刻从焦点树里消失，
+            // 焦点被系统丢给侧栏第一个导航项「频道」，触发「焦点到即切页」直接跳页。
+            // 改成始终可聚焦，busy 时只做视觉弱化，重复点击由 check() 内部的 busy 拦。
+            Button(
+                onClick = { check() },
+                modifier = Modifier.focusRequester(checkFocus).alpha(if (busy) 0.5f else 1f),
+            ) {
                 Text(if (busy) "请稍候" else "检查更新", fontSize = bodySize)
             }
             if (progress >= 0f && progress < 1f) {
@@ -213,11 +226,20 @@ internal fun UpdateSection(
                     Text(i.notes, color = TextDim, fontSize = bodySize)
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Button(onClick = { downloadAndInstall(i) }, enabled = !busy) {
+                    Button(
+                        onClick = { downloadAndInstall(i) },
+                        modifier = Modifier.alpha(if (busy) 0.5f else 1f),
+                    ) {
                         Text("下载并安装", fontSize = bodySize)
                     }
                     Spacer(Modifier.width(10.dp))
-                    TextButton(onClick = { info = null; status = "" }) {
+                    // 这块点完会整体从界面移除，焦点节点跟着消失 —— 主动搬回「检查更新」。
+                    // 不搬的话，系统会把焦点甩给侧栏「频道」，又变成按一下就跳页。
+                    TextButton(onClick = {
+                        info = null
+                        status = ""
+                        runCatching { checkFocus.requestFocus() }
+                    }) {
                         Text("以后再说", fontSize = bodySize)
                     }
                 }
