@@ -1,10 +1,10 @@
 {
-  "versionCode": 36,
-  "versionName": "0.6.0",
-  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.6.0/iptv-player-0.6.0.apk",
+  "versionCode": 37,
+  "versionName": "0.6.1",
+  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.6.1/iptv-player-0.6.1.apk",
   "apkFallback": [
-    "https://github.com/lzp1314/meiying-tv/releases/download/v0.6.0/iptv-player-0.6.0.apk"
+    "https://github.com/lzp1314/meiying-tv/releases/download/v0.6.1/iptv-player-0.6.1.apk"
   ],
-  "sha256": "38e1dea4d6fa2537eaefc320f3bf5d472a7d80a6a1b003c3730abfa7885543d2",
-  "notes": "1) 修复卡顿跳屏保：注册MediaSession上报播放状态+Window级FLAG_KEEP_SCREEN_ON，卡顿/黑帧期间系统仍识别为播放中，不再弹屏保。\\n2) 后台暂停改为延迟900ms+回前台自动续播：屏保或切焦的短抖动不会停播，真按Home离开才暂停，回来自动接着播。\\n3) 频道分组栏焦点即切换：遥控器移到分组就立即刷新右侧频道列表，不再需要按确认。信号源栏保持按OK切换，避免误切重拉流。\\n4) 修复解码方式等选项选中态与焦点态撞色，光标位置一眼可见。"
+  "sha256": "b368a6db7ddd6a920287cdd9ed1968bd72698e255e2cae2821b21abec7263bcf",
+  "notes": "1) 修复设置页「检查更新」按钮按下后跳回频道界面的问题（按钮禁用导致遥控器焦点丢失，被系统甩给侧栏导航）。\\n2) 同一根因加固：下载并安装、以后再说两个按钮不再让焦点无处可落。"
 }
