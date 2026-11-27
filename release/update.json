@@ -1,10 +1,10 @@
 {
-  "versionCode": 35,
-  "versionName": "0.5.9",
-  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.9/iptv-player-0.5.9.apk",
+  "versionCode": 36,
+  "versionName": "0.6.0",
+  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.6.0/iptv-player-0.6.0.apk",
   "apkFallback": [
-    "https://github.com/lzp1314/meiying-tv/releases/download/v0.5.9/iptv-player-0.5.9.apk"
+    "https://github.com/lzp1314/meiying-tv/releases/download/v0.6.0/iptv-player-0.6.0.apk"
   ],
-  "sha256": "78f494ab2142dedde80327609faf6f3797dc33025946e8f3ecc469fc6f96ac73",
-  "notes": "1) 删除播放画面左下角常驻信息栏（频道名/当前节目/接下来一直显示的真凶）。\\n2) 换台提示精简为台名+当前节目闪3秒，去掉台标方块、清晰度、接下来三行。\\n3) 移除无用的台标网络加载，画面更干净。注：左上CCTV台标是直播信号自带水印，App无法去除。"
+  "sha256": "38e1dea4d6fa2537eaefc320f3bf5d472a7d80a6a1b003c3730abfa7885543d2",
+  "notes": "1) 修复卡顿跳屏保：注册MediaSession上报播放状态+Window级FLAG_KEEP_SCREEN_ON，卡顿/黑帧期间系统仍识别为播放中，不再弹屏保。\\n2) 后台暂停改为延迟900ms+回前台自动续播：屏保或切焦的短抖动不会停播，真按Home离开才暂停，回来自动接着播。\\n3) 频道分组栏焦点即切换：遥控器移到分组就立即刷新右侧频道列表，不再需要按确认。信号源栏保持按OK切换，避免误切重拉流。\\n4) 修复解码方式等选项选中态与焦点态撞色，光标位置一眼可见。"
 }
