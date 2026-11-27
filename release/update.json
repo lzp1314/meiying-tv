@@ -1,10 +1,10 @@
 {
-  "versionCode": 33,
-  "versionName": "0.5.7",
-  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.7/iptv-player-0.5.7.apk",
+  "versionCode": 34,
+  "versionName": "0.5.8",
+  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.8/iptv-player-0.5.8.apk",
   "apkFallback": [
-    "https://github.com/lzp1314/meiying-tv/releases/download/v0.5.7/iptv-player-0.5.7.apk"
+    "https://github.com/lzp1314/meiying-tv/releases/download/v0.5.8/iptv-player-0.5.8.apk"
   ],
-  "sha256": "237c9321bd54903dea6d0b864d98e45fe30dfcf7ef93d59fc7a96ce703dd2d9c",
-  "notes": "1) 底部节目进度条改为跟随换台 OSD：换台时出现，3 秒后和 OSD 卡片一起隐藏，平时画面干净。\\n2) 侧边导航「信号源」三个字一排显示：收紧图标与留白占用、强制单行，不再换行。\\n3) 设置里的按钮改成「刷新全部信号源」：点一次串行刷新所有已添加的源（一条刷完再下一条，避免老盒子被并发拖垮），不切源、不打断正在看的台，过程中提示进度。\\n4) 每个源行新增独立「刷新」入口（绿色，在编辑前面）：只刷这一条源、不切源不打断播放；遥控器左右键在源名→刷新→编辑→锁定之间移动。"
+  "sha256": "691e572e12801b78dbf01d498d1dd4f53c1df0c3fc7ea11bffe7019a9dd1c3c0",
+  "notes": "1) 修复设置页遥控器焦点：卡片外壳不再抢焦点，方向键直达「下载并安装」按钮，按 OK 生效。\\n2) 修复换台后左下角台标+时间一直显示：收起计时与台标加载解耦，3 秒准时消失。\\n3) 设置页新增「刷新节目单」按钮：只重拉 EPG 不重下订阅，填入的节目单地址改动后最快生效，不打断正在看的台。"
 }
