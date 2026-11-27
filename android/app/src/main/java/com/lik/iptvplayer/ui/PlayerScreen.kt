@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -107,6 +108,8 @@ import com.lik.iptvplayer.player.Warmer
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -415,6 +418,9 @@ fun PlayerScreen(
             val sid = activeId
             if (ch != null && sid != null) repo.prefs.rememberEngine(sid, ch, PlayEngine.VLC)
         }
+        // VLC 的分辨率走 Vout 事件回传；ExoPlayer 走 controller.onTracks。
+        // 两条路都写 mediaInfo，换台 OSD 和设置诊断共用同一份，不用维护两套状态。
+        e.onVideoSize = { text -> mediaInfo = text }
         e.onError = { msg ->
             // 分清「引擎自己没起来」和「这条流播不动」：
             // 前者换台也没用，得看设置里的诊断；后者才是换台/换源。
@@ -1393,6 +1399,8 @@ fun PlayerScreen(
                     osd = o,
                     logo = osdLogo?.takeIf { it.first == o.channel.id }?.second,
                     errorCode = errorCode,
+                    videoInfo = mediaInfo,
+                    engineName = if (usingVlc) "VLC" else "ExoPlayer",
                     isTv = isTv,
                     modifier = Modifier.align(Alignment.BottomStart)
                         .padding(
@@ -1401,6 +1409,17 @@ fun PlayerScreen(
                         ),
                 )
             }
+        }
+
+        // 底部节目进度条（0.5.6）：当前节目的起止时间来自 EPG，每秒推进。
+        // 直播没有传统时间轴，这条只表示「这一档节目播了多少、还剩多久」。
+        if (panel == null && current != null && fatalError == null) {
+            ProgramProgressBar(
+                channel = current!!,
+                isTv = isTv,
+                modifier = Modifier.align(Alignment.BottomCenter)
+                    .padding(bottom = if (isTv) 12.dp else 8.dp),
+            )
         }
 
         toast?.let { t ->
@@ -1429,6 +1448,8 @@ private fun ChannelOsdCard(
     osd: ChannelOsd,
     logo: Bitmap?,
     errorCode: String,
+    videoInfo: String,
+    engineName: String,
     isTv: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -1504,6 +1525,18 @@ private fun ChannelOsdCard(
                     modifier = Modifier.widthIn(max = textMax),
                 )
             }
+            // 分辨率跟着 OSD 一起闪 3 秒：ExoPlayer 与 VLC 都上报，换台后内部自动更新。
+            // 只要分辨率行，不把整段诊断文字塞进 OSD——那会挡住画面。
+            if (videoInfo.isNotBlank()) {
+                Text(
+                    "$videoInfo · $engineName",
+                    color = Accent,
+                    fontSize = if (isTv) 12.sp else 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = textMax),
+                )
+            }
             // 最近一次错误码直接摆到换台提示上：下次卡住无需连 adb 就知道是 IO 还是解码器
             if (errorCode.isNotBlank()) {
                 Text(
@@ -1513,6 +1546,79 @@ private fun ChannelOsdCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.widthIn(max = textMax),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 底部节目进度条：显示当前档节目播了多少、还剩多久（0.5.6）。
+ *
+ * 直播流没有起点终点，做不了传统可拖动时间轴。这里用 EPG 的 currentStart/currentStop
+ * 算「这一档节目的进度」，每秒推进一次。没有 EPG 的源明确写「无节目单」，不摆一条空条
+ * 让人误以为坏了。整个条半透明、贴底居中，不挡画面。
+ */
+@Composable
+private fun ProgramProgressBar(
+    channel: Channel,
+    isTv: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val start = channel.currentStart
+    val stop = channel.currentStop
+    val hasEpg = start > 0 && stop > start
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(start, stop) {
+        // 有 EPG 时每秒推进；没有就只跑一次，后面 pure text 不需要刷新
+        while (hasEpg) {
+            delay(1_000)
+            now = System.currentTimeMillis()
+        }
+    }
+    val timeFmt = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+    val progress: Float
+    val caption: String
+    if (hasEpg) {
+        progress = ((now - start).toFloat() / (stop - start).toFloat()).coerceIn(0f, 1f)
+        val leftMin = ((stop - now) / 60_000).coerceAtLeast(0)
+        val elapsedMin = ((now - start) / 60_000).coerceAtLeast(0)
+        caption = buildString {
+            append(timeFmt.format(start)).append("–").append(timeFmt.format(stop))
+            append("　已播 ").append(elapsedMin).append(" 分")
+            if (leftMin > 0) append(" · 剩 ").append(leftMin).append(" 分")
+        }
+    } else {
+        progress = 0f
+        caption = "无节目单（该源未提供 EPG）"
+    }
+    Column(
+        modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xB30B1220))
+            .padding(horizontal = if (isTv) 18.dp else 12.dp, vertical = if (isTv) 8.dp else 6.dp)
+            .widthIn(min = if (isTv) 360.dp else 220.dp, max = if (isTv) 620.dp else 380.dp),
+    ) {
+        Text(
+            caption,
+            color = if (hasEpg) Color(0xFFE2E8F0) else TextDim,
+            fontSize = if (isTv) 13.sp else 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Box(
+            Modifier.fillMaxWidth()
+                .padding(top = 6.dp)
+                .height(if (isTv) 5.dp else 4.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(Color(0x33FFFFFF)),
+        ) {
+            if (hasEpg) {
+                Box(
+                    Modifier.fillMaxWidth(progress)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(Accent),
                 )
             }
         }

@@ -39,6 +39,15 @@ class VlcEngine(context: Context) {
     var onStarted: () -> Unit = { }
 
     /**
+     * 视频轨分辨率摘要，如 `1920×1080`（0.5.6 起）。
+     *
+     * libVLC 的 Vout 事件里视频轨已经就绪，用 getCurrentVideoTrack() 取宽高；
+     * ExoPlayer 侧同信息由 PlayerController.onTracks 上报，两条路最终都写进
+     * PlayerScreen 的 mediaInfo，换台 OSD 和设置诊断共用一份。
+     */
+    var onVideoSize: (String) -> Unit = { _ -> }
+
+    /**
      * 初始化失败的原因（空串=成功）。
      * 0.5.0 把异常吞成一句「初始化失败」，线上完全没法定位；
      * 这里保留「异常类名 + message + 底层 cause」，并显示到设置页诊断行。
@@ -120,6 +129,13 @@ class VlcEngine(context: Context) {
                         MediaPlayer.Event.Vout -> {
                             cancelWatchdog()
                             onStarted()
+                            // 视频轨这时才就绪，取宽高回传给 OSD；读不到就留空，不瞎猜
+                            runCatching { mp.currentVideoTrack }.getOrNull()?.let { vt ->
+                                if (vt.width > 0 && vt.height > 0) {
+                                    val text = "${vt.width}×${vt.height}"
+                                    mainHandler.post { onVideoSize(text) }
+                                }
+                            }
                         }
                         MediaPlayer.Event.EncounteredError ->
                             onError("VLC 无法解码该码流（编码或地址不受支持）")
