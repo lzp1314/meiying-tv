@@ -759,6 +759,51 @@ fun PlayerScreen(
         }
     }
 
+    /**
+     * 刷新一条源，但不切过去、不打断正在播的台（0.5.7）。
+     *
+     * 和 [load] 的区别：load 会切 activeId、可能重启播放；这里只更新快照。
+     * repo.refresh 内部会写缓存并更新 sources 列表，调用方只需把结果同步到界面。
+     * @param quiet 静默模式：批量刷新时不逐条弹 toast，由调用方最后统一提示
+     */
+    suspend fun refreshOne(s: Source, quiet: Boolean = false): Boolean {
+        val r = repo.refresh(s.id).getOrNull() ?: return false
+        if (s.id == activeId) {
+            // 当前源：只把节目单/频道列表换成新的，current 若能对上就原地更新，
+            // 绝不重新起播——用户点刷新时正在看的台不能断。
+            result = r
+            val keep = current?.id?.let { cid -> r.channels.firstOrNull { it.id == cid } }
+            if (keep != null) current = keep
+        } else {
+            otherChannels = otherChannels + (s.id to r)
+        }
+        if (!quiet) toast = "已刷新「${s.name}」"
+        return true
+    }
+
+    /** 刷新所有已添加的源：串行，一个完成再下一个，不打断当前播放。 */
+    fun refreshAllSources() {
+        val all = repo.sources.value.toList()
+        if (all.isEmpty()) {
+            toast = "还没有添加源，先扫码添加"
+            return
+        }
+        scope.launch {
+            toast = "正在刷新 ${all.size} 条源（1/${all.size}）…"
+            var ok = 0
+            all.forEachIndexed { i, s ->
+                if (refreshOne(s, quiet = true)) ok++
+                if (i < all.size - 1) toast = "正在刷新 ${all.size} 条源（${i + 2}/${all.size}）…"
+            }
+            toast = "刷新完成：$ok/${all.size} 条源"
+        }
+    }
+
+    /** 只刷新一条源（设置/信号源页每行「刷新」按钮调用）。 */
+    fun refreshSource(s: Source) {
+        scope.launch { refreshOne(s) }
+    }
+
     fun switchTo(s: Source) {
         val locked = repo.lockedId.value
         if (locked != null && locked != s.id) {
@@ -1333,7 +1378,9 @@ fun PlayerScreen(
                         null
                     }
                 },
-                onRefresh = { activeId?.let { load(it, autoplay = current == null, force = true) } },
+                // 0.5.7：这个按钮从「只刷当前源」改成「串行刷新所有源」，不打断正在播的台
+                onRefresh = { refreshAllSources() },
+                onRefreshSource = { s -> refreshSource(s) },
                 decoder = decoderName,
                 errorCode = errorCode,
                 mediaInfo = mediaInfo,
@@ -1411,9 +1458,10 @@ fun PlayerScreen(
             }
         }
 
-        // 底部节目进度条（0.5.6）：当前节目的起止时间来自 EPG，每秒推进。
+        // 底部节目进度条（0.5.6 加，0.5.7 改为跟 OSD 一起 3 秒隐藏）：
+        // 用户嫌它常驻挡画面，现在只在换台那 3.2 秒里随 OSD 一起出现、一起收起。
         // 直播没有传统时间轴，这条只表示「这一档节目播了多少、还剩多久」。
-        if (panel == null && current != null && fatalError == null) {
+        if (panel == null && current != null && fatalError == null && osd != null) {
             ProgramProgressBar(
                 channel = current!!,
                 isTv = isTv,
@@ -1641,6 +1689,7 @@ private fun SettingsPanel(
     onSaveDraft: (DraftSource) -> Unit,
     onDropDraft: (DraftSource) -> Unit,
     onRefresh: () -> Unit,
+    onRefreshSource: (Source) -> Unit,
     onChannels: () -> Unit,
     onClose: () -> Unit,
     decoder: String,
@@ -1763,6 +1812,7 @@ private fun SettingsPanel(
                         onSwitch = { onSwitch(s) },
                         onLock = { onLock(s) },
                         onEdit = { onEdit(s) },
+                        onRefresh = { onRefreshSource(s) },
                     )
                 }
                 if (sources.isEmpty()) {
@@ -2101,14 +2151,16 @@ internal fun SourceRow(
     onSwitch: () -> Unit,
     onLock: () -> Unit,
     onEdit: () -> Unit,
+    onRefresh: () -> Unit,
 ) {
-    // 三个控件各自可聚焦：源名 / 编辑 / 锁定。
+    // 四个控件各自可聚焦：源名 / 刷新 / 编辑 / 锁定。
     // 遥控器左右键在它们之间自然移动，确认键执行——不靠任何手动 requestFocus 跳转，
     // 那种做法在真机上焦点一乱就按不到按钮。
     var nameFocused by remember { mutableStateOf(false) }
+    var refreshFocused by remember { mutableStateOf(false) }
     var editFocused by remember { mutableStateOf(false) }
     var lockFocused by remember { mutableStateOf(false) }
-    val anyFocused = nameFocused || editFocused || lockFocused
+    val anyFocused = nameFocused || refreshFocused || editFocused || lockFocused
     val bg = when {
         anyFocused -> RowFocus
         isActive -> RowActive
@@ -2154,7 +2206,18 @@ internal fun SourceRow(
             )
         }
         Spacer(Modifier.width(6.dp))
-        // 控件 2：编辑
+        // 控件 2：刷新（0.5.7）——只刷这一条源，不切源、不打断正在播的台
+        Box(
+            Modifier.clip(chipShape)
+                .background(if (refreshFocused) Color(0x33FFFFFF) else Color.Transparent)
+                .focusRing(refreshFocused && tvFocusable, chipShape)
+                .onFocusChanged { refreshFocused = it.isFocused }
+                .then(focusMod)
+                .clickable { onRefresh() }
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+        ) { Text("刷新", color = Color(0xFF86EFAC), fontSize = if (isTv) 13.sp else 12.sp) }
+        Spacer(Modifier.width(4.dp))
+        // 控件 3：编辑
         Box(
             Modifier.clip(chipShape)
                 .background(if (editFocused) Color(0x33FFFFFF) else Color.Transparent)

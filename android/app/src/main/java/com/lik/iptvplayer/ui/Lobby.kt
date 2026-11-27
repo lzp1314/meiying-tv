@@ -123,6 +123,7 @@ internal fun LobbyPanel(
     onDropDraft: (DraftSource) -> Unit,
     onAddManual: (String, String, String) -> String?,
     onRefresh: () -> Unit,
+    onRefreshSource: (Source) -> Unit,
     decoder: String,
     errorCode: String = "",
     mediaInfo: String = "",
@@ -187,6 +188,7 @@ internal fun LobbyPanel(
                         onSwitch = onSwitchSource,
                         onLock = onLock,
                         onEdit = onEdit,
+                        onRefresh = onRefreshSource,
                     )
                     LobbyTab.Settings -> SettingsPage(
                         current = current,
@@ -204,6 +206,7 @@ internal fun LobbyPanel(
                         keyUpNext = keyUpNext,
                         onKeyUpNext = onKeyUpNext,
                         onRefresh = onRefresh,
+                        onRefreshSource = onRefreshSource,
                         updateUrl = updateUrl,
                         onUpdateUrl = onUpdateUrl,
                         pairInfo = pairInfo,
@@ -348,16 +351,20 @@ private fun NavItem(
                 }
             }
             .clickable { onClick() }
-            .padding(horizontal = if (isTv) 16.dp else 10.dp),
+            // 0.5.7：导航项宽度有限，「信号源」三个字原来被挤到换行。
+            // 收紧左右留白和图标间距，给文字腾出一排的宽度；手机端也一起收紧。
+            .padding(horizontal = if (isTv) 10.dp else 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         NavIcon(tab, fg)
-        Spacer(Modifier.width(if (isTv) 12.dp else 8.dp))
+        Spacer(Modifier.width(if (isTv) 8.dp else 6.dp))
         Text(
             tab.label,
             color = fg,
-            fontSize = if (isTv) 20.sp else 16.sp,
+            fontSize = if (isTv) 19.sp else 16.sp,
             fontWeight = if (selected || focused) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            softWrap = false,
         )
     }
 }
@@ -743,6 +750,7 @@ private fun SourcesPage(
     onSwitch: (Source) -> Unit,
     onLock: (Source) -> Unit,
     onEdit: (Source) -> Unit,
+    onRefresh: (Source) -> Unit,
 ) {
     // 第四点：光标停在「当前正在用的源」上，不是永远落在第一条
     val activeFocus = remember { FocusRequester() }
@@ -774,6 +782,7 @@ private fun SourcesPage(
                     onSwitch = { onSwitch(one) },
                     onLock = { onLock(one) },
                     onEdit = { onEdit(one) },
+                    onRefresh = { onRefresh(one) },
                 )
             }
             if (sources.isEmpty()) {
@@ -908,6 +917,7 @@ private fun SettingsPage(
     keyUpNext: Boolean,
     onKeyUpNext: (Boolean) -> Unit,
     onRefresh: () -> Unit,
+    onRefreshSource: (Source) -> Unit,
     updateUrl: String,
     onUpdateUrl: (String) -> Unit,
     pairInfo: PairInfo?,
@@ -1001,10 +1011,11 @@ private fun SettingsPage(
                             onSwitch = { onSwitchSource(one) },
                             onLock = { onLock(one) },
                             onEdit = { onEdit(one) },
+                            onRefresh = { onRefreshSource(one) },
                         )
                     }
                 }
-                TextButton(onClick = onRefresh) { Text("刷新信号源", fontSize = 14.sp) }
+                TextButton(onClick = onRefresh) { Text("刷新全部信号源", fontSize = 14.sp) }
                 AddSourceQrBlock(isTv, pairInfo, pending, onSaveDraft, onDropDraft, onAddManual)
             }
         }
