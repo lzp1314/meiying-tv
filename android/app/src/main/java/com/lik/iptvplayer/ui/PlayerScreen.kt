@@ -3,7 +3,6 @@ package com.lik.iptvplayer.ui
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
-import android.graphics.Bitmap
 import android.media.AudioManager
 import android.os.SystemClock
 import android.provider.Settings
@@ -79,7 +78,6 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -93,7 +91,6 @@ import androidx.media3.ui.PlayerView
 import com.lik.iptvplayer.core.Channel
 import com.lik.iptvplayer.core.DecodeMode
 import com.lik.iptvplayer.core.Diag
-import com.lik.iptvplayer.core.LogoLoader
 import com.lik.iptvplayer.core.PairInfo
 import com.lik.iptvplayer.core.PairingServer
 import com.lik.iptvplayer.core.PlayEngine
@@ -108,7 +105,6 @@ import com.lik.iptvplayer.player.Warmer
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.math.abs
@@ -303,7 +299,6 @@ fun PlayerScreen(
     var osd by remember { mutableStateOf<ChannelOsd?>(null) }
     // 数字键缓冲：连续按的几位数字攒在这里，1.6 秒没新输入就跳台
     var digitBuf by remember { mutableStateOf("") }
-    var osdLogo by remember { mutableStateOf<Pair<String, Bitmap>?>(null) }
     // 遥控器上下键方向：true = 上键下一个台
     var keyUpNext by remember { mutableStateOf(repo.prefs.keyUpNext) }
     var pairInfo by remember { mutableStateOf<PairInfo?>(null) }
@@ -684,17 +679,6 @@ fun PlayerScreen(
         val id = osd?.channel?.id ?: return@LaunchedEffect
         delay(3_200)
         if (osd?.channel?.id == id) osd = null
-    }
-
-    /** 台标单独拉：走内存缓存，反复切台不重复下载；1.6 秒硬超时，绝不拖住收起。 */
-    LaunchedEffect(osd?.channel?.id, osd?.channel?.logo) {
-        val shown = osd ?: return@LaunchedEffect
-        val logoUrl = shown.channel.logo
-        if (logoUrl.isBlank()) return@LaunchedEffect
-        val bmp = withTimeoutOrNull(1_600) { LogoLoader.load(logoUrl, 120) }
-        if (bmp != null && osd?.channel?.id == shown.channel.id) {
-            osdLogo = shown.channel.id to bmp
-        }
     }
 
     /** 把缓存时长说成人话，显示在设置面板里，方便判断数据新旧。 */
@@ -1178,27 +1162,10 @@ fun PlayerScreen(
             )
 
             if (current != null) {
-                Column(
-                    Modifier.align(Alignment.BottomStart)
-                        .padding(horizontal = if (isTv) 48.dp else 20.dp, vertical = if (isTv) 32.dp else 16.dp),
-                ) {
-                    Text(
-                        current?.name.orEmpty(),
-                        color = Color.White,
-                        fontSize = if (isTv) 26.sp else 20.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        current?.current.orEmpty().ifBlank { " " },
-                        color = Color(0xFF86EFAC),
-                        fontSize = if (isTv) 16.sp else 13.sp,
-                    )
-                    Text(
-                        current?.next.orEmpty().let { if (it.isBlank()) "" else "接下来：$it" },
-                        color = TextDim,
-                        fontSize = if (isTv) 14.sp else 12.sp,
-                    )
-                }
+                // 0.5.9：左下角常驻的频道名/当前节目/「接下来」整块移除。
+                // 这块从不受 OSD 的 3 秒计时控制，只要 current != null 就永远挂在画面上——
+                // 就是用户看到的「台标+清晰度+接下来一直显示」的真凶。
+                // 换台反馈统一交给 ChannelOsdCard（3 秒自动收起），平时画面保持干净。
                 Text(
                     if (isTv) "菜单键 侧栏 · OK 暂停 · 上下键 换台"
                     else "双击 暂停 · 点左 频道 · 点右 设置 · 左滑换台 · 中亮度 右音量",
@@ -1487,15 +1454,13 @@ fun PlayerScreen(
             )
         }
 
-        // 换台提示：左下角浮一下，3 秒收起。序号 + 台标 + 当前节目都在里面
+        // 换台提示：左下角浮一下，3 秒收起。
+        // 0.5.9：按用户要求隐藏台标/清晰度/「接下来」，只留频道名 + 当前节目作为换台反馈。
         osd?.let { o ->
             if (panel == null) {
                 ChannelOsdCard(
                     osd = o,
-                    logo = osdLogo?.takeIf { it.first == o.channel.id }?.second,
                     errorCode = errorCode,
-                    videoInfo = mediaInfo,
-                    engineName = if (usingVlc) "VLC" else "ExoPlayer",
                     isTv = isTv,
                     modifier = Modifier.align(Alignment.BottomStart)
                         .padding(
@@ -1534,116 +1499,54 @@ fun PlayerScreen(
 }
 
 /**
- * 换台提示卡片：序号 + 台标 + 频道名 + 当前/下一节目。
+ * 换台提示卡片：频道名 + 当前节目，3 秒自动收起。
  *
- * 电视端原来换完台屏幕上没有任何反馈，看不出切到了第几台、也没有台标。
- * 没有台标时把序号画进方块里，保证「第几台」永远读得到。
+ * 0.5.9 按用户要求精简：台标方块、清晰度、「接下来」三行全部去掉。
+ * 只保留最少信息——换完台知道切到了哪个台、正在播什么即可，画面保持干净。
+ * 错误码保留：卡住时无需连 adb 就知道是 IO 还是解码器问题。
  */
 @Composable
 private fun ChannelOsdCard(
     osd: ChannelOsd,
-    logo: Bitmap?,
     errorCode: String,
-    videoInfo: String,
-    engineName: String,
     isTv: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val ch = osd.channel
     val textMax = if (isTv) 380.dp else 200.dp
-    Row(
+    Column(
         modifier
             .clip(RoundedCornerShape(14.dp))
             .background(Color(0xE60B1220))
             .padding(horizontal = if (isTv) 18.dp else 12.dp, vertical = if (isTv) 14.dp else 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            Modifier.size(if (isTv) 72.dp else 50.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(Color(0x3316223A)),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (logo != null) {
-                Image(
-                    bitmap = logo.asImageBitmap(),
-                    contentDescription = null,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize().padding(5.dp),
-                )
-            } else {
-                Text(
-                    if (osd.index > 0) osd.index.toString() else "—",
-                    color = Accent,
-                    fontSize = if (isTv) 24.sp else 16.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
-        }
-        Box(Modifier.size(if (isTv) 16.dp else 10.dp, 1.dp))
-        Column {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // 有台标时序号挪到台名前面，不浪费那块方块
-                if (osd.index > 0 && logo != null) {
-                    Text(
-                        osd.index.toString(),
-                        color = Accent,
-                        fontSize = if (isTv) 20.sp else 15.sp,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Box(Modifier.size(if (isTv) 10.dp else 6.dp, 1.dp))
-                }
-                Text(
-                    ch.name,
-                    color = Color.White,
-                    fontSize = if (isTv) 21.sp else 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = textMax),
-                )
-            }
+        Text(
+            ch.name,
+            color = Color.White,
+            fontSize = if (isTv) 21.sp else 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = textMax),
+        )
+        Text(
+            ch.current.ifBlank { "暂无节目信息" },
+            color = if (ch.current.isBlank()) TextDim else Color(0xFF86EFAC),
+            fontSize = if (isTv) 14.sp else 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = textMax),
+        )
+        // 最近一次错误码：卡住时无需连 adb 就知道是 IO 还是解码器
+        if (errorCode.isNotBlank()) {
             Text(
-                ch.current.ifBlank { "暂无节目信息" },
-                color = if (ch.current.isBlank()) TextDim else Color(0xFF86EFAC),
-                fontSize = if (isTv) 14.sp else 11.sp,
+                "错误：$errorCode",
+                color = Color(0xFFFCA5A5),
+                fontSize = if (isTv) 12.sp else 10.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.widthIn(max = textMax),
             )
-            if (ch.next.isNotBlank()) {
-                Text(
-                    "接下来：${ch.next}",
-                    color = TextDim,
-                    fontSize = if (isTv) 12.sp else 10.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = textMax),
-                )
-            }
-            // 分辨率跟着 OSD 一起闪 3 秒：ExoPlayer 与 VLC 都上报，换台后内部自动更新。
-            // 只要分辨率行，不把整段诊断文字塞进 OSD——那会挡住画面。
-            if (videoInfo.isNotBlank()) {
-                Text(
-                    "$videoInfo · $engineName",
-                    color = Accent,
-                    fontSize = if (isTv) 12.sp else 10.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = textMax),
-                )
-            }
-            // 最近一次错误码直接摆到换台提示上：下次卡住无需连 adb 就知道是 IO 还是解码器
-            if (errorCode.isNotBlank()) {
-                Text(
-                    "错误：$errorCode",
-                    color = Color(0xFFFCA5A5),
-                    fontSize = if (isTv) 12.sp else 10.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = textMax),
-                )
-            }
         }
     }
 }
