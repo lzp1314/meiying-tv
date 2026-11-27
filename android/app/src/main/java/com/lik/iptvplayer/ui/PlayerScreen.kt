@@ -108,6 +108,7 @@ import com.lik.iptvplayer.player.Warmer
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.math.abs
@@ -671,16 +672,29 @@ fun PlayerScreen(
         jumpToNumber(text)
     }
 
-    /** 换台提示：顺手拉一次台标，3 秒后自动收起。台标走内存缓存，反复切台不会重复下载。 */
+    /**
+     * 换台提示 3.2 秒后自动收起（0.5.8 修复常驻 bug）。
+     *
+     * 旧写法把「拉台标」和「延时收起」串在同一个协程里，且 delay 排在
+     * LogoLoader.load() 之后：台标请求一旦排队（并发限 3）或卡在网络上，
+     * delay 根本轮不到执行，OSD 就永远挂在左下角。
+     * 现在收起计时只看换台 id，和台标加载完全解耦——无论台标多慢都按时消失。
+     */
+    LaunchedEffect(osd?.channel?.id) {
+        val id = osd?.channel?.id ?: return@LaunchedEffect
+        delay(3_200)
+        if (osd?.channel?.id == id) osd = null
+    }
+
+    /** 台标单独拉：走内存缓存，反复切台不重复下载；1.6 秒硬超时，绝不拖住收起。 */
     LaunchedEffect(osd?.channel?.id, osd?.channel?.logo) {
         val shown = osd ?: return@LaunchedEffect
         val logoUrl = shown.channel.logo
-        if (logoUrl.isNotBlank()) {
-            val bmp = LogoLoader.load(logoUrl, 120)
-            if (bmp != null) osdLogo = shown.channel.id to bmp
+        if (logoUrl.isBlank()) return@LaunchedEffect
+        val bmp = withTimeoutOrNull(1_600) { LogoLoader.load(logoUrl, 120) }
+        if (bmp != null && osd?.channel?.id == shown.channel.id) {
+            osdLogo = shown.channel.id to bmp
         }
-        delay(3_200)
-        if (osd?.channel?.id == shown.channel.id) osd = null
     }
 
     /** 把缓存时长说成人话，显示在设置面板里，方便判断数据新旧。 */
@@ -802,6 +816,38 @@ fun PlayerScreen(
     /** 只刷新一条源（设置/信号源页每行「刷新」按钮调用）。 */
     fun refreshSource(s: Source) {
         scope.launch { refreshOne(s) }
+    }
+
+    /**
+     * 只重拉所有源的节目单，不重下 M3U 订阅（0.5.8）。
+     * 和 [refreshAllSources] 的区别：订阅列表不动，只换 EPG 三张表，
+     * 所以用户的手填节目单地址改动后能最快生效，也不会因为订阅服务器慢而卡住。
+     */
+    fun refreshAllEpg() {
+        val all = repo.sources.value.toList()
+        if (all.isEmpty()) {
+            toast = "还没有添加源，先扫码添加"
+            return
+        }
+        scope.launch {
+            toast = "正在刷新 ${all.size} 条源的节目单（1/${all.size}）…"
+            var ok = 0
+            all.forEachIndexed { i, s ->
+                val r = repo.refreshEpg(s.id).getOrNull()
+                if (r != null) {
+                    ok++
+                    if (s.id == activeId) {
+                        result = r
+                        val keep = current?.id?.let { cid -> r.channels.firstOrNull { it.id == cid } }
+                        if (keep != null) current = keep
+                    } else {
+                        otherChannels = otherChannels + (s.id to r)
+                    }
+                }
+                if (i < all.size - 1) toast = "正在刷新节目单（${i + 2}/${all.size}）…"
+            }
+            toast = "节目单刷新完成：$ok/${all.size} 条源"
+        }
     }
 
     fun switchTo(s: Source) {
@@ -1380,6 +1426,8 @@ fun PlayerScreen(
                 },
                 // 0.5.7：这个按钮从「只刷当前源」改成「串行刷新所有源」，不打断正在播的台
                 onRefresh = { refreshAllSources() },
+                // 0.5.8：只刷节目单，不重下订阅
+                onRefreshEpg = { refreshAllEpg() },
                 onRefreshSource = { s -> refreshSource(s) },
                 decoder = decoderName,
                 errorCode = errorCode,

@@ -9,6 +9,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 /**
  * 频道台标加载。
@@ -32,6 +33,15 @@ object LogoLoader {
     private val permits = Semaphore(MAX_PARALLEL)
     private val failures = ConcurrentHashMap<String, Long>()
 
+    /**
+     * 台标专用客户端：继承主客户端的 SSL 兜底，但加 callTimeout 硬闸。
+     * 0.5.8：台标只是几十像素的装饰图，一个坏地址不该长期占着并发许可——
+     * 此前 connectTimeout 12s / readTimeout 20s 叠加排队，能让换台 OSD 一直等台标。
+     */
+    private val client by lazy {
+        Network.client.newBuilder().callTimeout(4, TimeUnit.SECONDS).build()
+    }
+
     suspend fun load(url: String, maxPx: Int): Bitmap? = withContext(Dispatchers.IO) {
         val key = url.trim()
         if (key.isEmpty()) return@withContext null
@@ -50,7 +60,7 @@ object LogoLoader {
                     .url(key)
                     .header("User-Agent", "IPTVPlayer/1.0 (Android)")
                     .build()
-                Network.client.newCall(request).execute().use { response ->
+                client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@use null
                     val body = response.body ?: return@use null
                     val declared = body.contentLength()

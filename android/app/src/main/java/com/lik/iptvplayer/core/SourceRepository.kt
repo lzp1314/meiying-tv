@@ -202,6 +202,86 @@ class SourceRepository(
     }
 
     /**
+     * 只重拉节目单，不碰 M3U 订阅（0.5.8「刷新节目单」按钮）。
+     *
+     * 场景：用户手填了 EPG 地址，订阅列表没变，只想让节目单更新。
+     * 走 [refresh] 会把订阅也重下一遍（可能几 MB、老盒子上很慢），这里省掉那一步；
+     * 频道列表沿用现有缓存，只换 EPG 三张表并按当前时间重算 now/next。
+     * 完全没有缓存时退化成 [refresh]——没有频道就没法对表。
+     */
+    suspend fun refreshEpg(id: String): Result<RefreshResult> = withContext(Dispatchers.IO) {
+        val src = _sources.value.firstOrNull { it.id == id }
+            ?: return@withContext Result.failure(IllegalArgumentException("订阅源不存在"))
+        val old = cache[id] ?: snapshots.load(id)
+        if (old == null) return@withContext refresh(id)
+
+        runCatching {
+            val wantedIds = old.channels
+                .mapNotNull { it.tvgId.trim().takeIf(String::isNotEmpty) }
+                .toSet()
+            val wantedNames = old.channels.map { it.name }.toSet()
+            val limit = if (Diag.isLowRam) Network.EPG_MAX_BYTES_LOW_RAM else Network.EPG_MAX_BYTES
+
+            // 地址优先级：用户手填 > 上次成功用的（自动发现回写）> 播放列表声明
+            var usedEpgUrl = src.epgUrl.ifBlank { old.epgUrl.orEmpty() }
+            if (usedEpgUrl.isBlank()) usedEpgUrl = old.declaredEpgUrl.orEmpty()
+            var epg: Epg? = null
+            var epgError: String? = null
+
+            val candidates = buildList {
+                if (usedEpgUrl.isNotBlank()) add(usedEpgUrl)
+                // 用户手填了就只信它，不再到处乱试（与 refresh 保持同一策略）
+                if (src.epgUrl.isBlank()) addAll(BUILTIN_EPG.filter { it != usedEpgUrl })
+            }
+
+            for (candidate in candidates) {
+                try {
+                    val parsed = Network.stream(candidate, limit) { input ->
+                        XmltvParser.parseStream(input, wantedIds, wantedNames)
+                    }
+                    val usable = if (parsed.programmes.isEmpty() &&
+                        (wantedIds.isNotEmpty() || wantedNames.isNotEmpty())
+                    ) {
+                        Network.stream(candidate, limit) { input -> XmltvParser.parseStream(input) }
+                    } else {
+                        parsed
+                    }
+                    if (usable.programmes.isEmpty()) {
+                        epgError = "节目单里没有能对上本源频道的节目"
+                        continue
+                    }
+                    epg = usable
+                    usedEpgUrl = candidate
+                    epgError = null
+                    break
+                } catch (t: Throwable) {
+                    // OutOfMemoryError 不是 Exception，必须按 Throwable 兜住
+                    epgError = t.message?.take(80) ?: t.javaClass.simpleName
+                }
+            }
+
+            val now = System.currentTimeMillis()
+            val snap = old.copy(
+                epgUrl = usedEpgUrl.ifBlank { null },
+                epgError = epgError,
+                epgByTvg = epg?.channels.orEmpty(),
+                epgByName = epg?.byName.orEmpty(),
+                programmes = trimProgrammes(epg, now),
+                fetchedAt = now,
+            )
+            cache[id] = snap
+            fetchedAt[id] = now
+            snapshots.save(snap)
+            val autoEpg = if (src.epgUrl.isBlank() && epg != null) usedEpgUrl else src.epgUrl
+            if (autoEpg != src.epgUrl) {
+                store.put(src.copy(epgUrl = autoEpg))
+                _sources.value = store.list()
+            }
+            snap.toResult(now)
+        }
+    }
+
+    /**
      * 快照只留「过去 2 小时 ~ 未来」的节目，并且有总量上限。
      * 不设上限的话，一次全量节目单能写出十几 MB JSON，序列化时字符串本身就能把
      * 1GB 内存的盒子撑爆——那台机器上「加载数据源闪退」就是这么来的。

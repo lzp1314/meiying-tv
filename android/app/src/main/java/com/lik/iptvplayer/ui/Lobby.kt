@@ -123,6 +123,7 @@ internal fun LobbyPanel(
     onDropDraft: (DraftSource) -> Unit,
     onAddManual: (String, String, String) -> String?,
     onRefresh: () -> Unit,
+    onRefreshEpg: () -> Unit,
     onRefreshSource: (Source) -> Unit,
     decoder: String,
     errorCode: String = "",
@@ -206,6 +207,7 @@ internal fun LobbyPanel(
                         keyUpNext = keyUpNext,
                         onKeyUpNext = onKeyUpNext,
                         onRefresh = onRefresh,
+                        onRefreshEpg = onRefreshEpg,
                         onRefreshSource = onRefreshSource,
                         updateUrl = updateUrl,
                         onUpdateUrl = onUpdateUrl,
@@ -917,6 +919,7 @@ private fun SettingsPage(
     keyUpNext: Boolean,
     onKeyUpNext: (Boolean) -> Unit,
     onRefresh: () -> Unit,
+    onRefreshEpg: () -> Unit,
     onRefreshSource: (Source) -> Unit,
     updateUrl: String,
     onUpdateUrl: (String) -> Unit,
@@ -1015,7 +1018,12 @@ private fun SettingsPage(
                         )
                     }
                 }
-                TextButton(onClick = onRefresh) { Text("刷新全部信号源", fontSize = 14.sp) }
+                // 两个刷新按钮并排：一个连订阅带节目单整套重拉，一个只刷填入的节目单
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = onRefresh) { Text("刷新全部信号源", fontSize = 14.sp) }
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(onClick = onRefreshEpg) { Text("刷新节目单", fontSize = 14.sp) }
+                }
                 AddSourceQrBlock(isTv, pairInfo, pending, onSaveDraft, onDropDraft, onAddManual)
             }
         }
@@ -1027,9 +1035,10 @@ private fun SettingsPage(
             }
         }
 
-        // ④ 诊断：只看不按的文字集中在一起，不再插在可操作项中间打断焦点
+        // ④ 诊断：只看不按的文字集中在一起，不再插在可操作项中间打断焦点。
+        // 内部没有按钮，必须让外壳可聚焦，否则遥控器滚不到这一块。
         item {
-            SettingCard("诊断") {
+            SettingCard("诊断", shellFocusable = true) {
                 if (mediaInfo.isNotBlank()) {
                     Text("当前编码：$mediaInfo", color = Color(0xFF93C5FD), fontSize = 12.sp)
                 }
@@ -1055,9 +1064,9 @@ private fun SettingsPage(
             }
         }
 
-        // ⑤ 关于
+        // ⑤ 关于：同样是纯文字，外壳可聚焦才能滚到
         item {
-            SettingCard("关于") {
+            SettingCard("关于", shellFocusable = true) {
                 Text(deviceInfo, color = Color(0xFF64748B), fontSize = 11.sp, maxLines = 4)
                 Text("版本 $versionName", color = Color(0xFF64748B), fontSize = 11.sp)
                 if (crashLog != null) {
@@ -1081,13 +1090,23 @@ private fun LabeledRow(label: String, content: @Composable () -> Unit) {
 }
 
 /**
- * 设置页的一张卡片：独立圆角背景 + 标题，遥控器上下键逐块走。
+ * 设置页的一张卡片：独立圆角背景 + 标题。
  *
- * 0.5.5 把原来平铺的一整列拆成五块。卡片本身可聚焦，
- * 这样纯文字的诊断/关于块也能被遥控器滚到（不可聚焦的 item 永远到不了）。
+ * 0.5.8 方案 B——外壳默认**不可聚焦**，只做视觉容器。
+ * 旧版给外壳加了 focusable()，结果遥控器焦点先落到这个大 Box 上：
+ * 它没有 clickable，按 OK 没反应；上下键又容易整块跳过内部按钮。
+ * 检查更新后动态出现的「下载并安装」因此基本到不了（用户实机反馈）。
+ * 现在焦点直接落在内部按钮上，上下键在按钮之间走，OK 立刻生效。
+ *
+ * 只有内部完全没有可聚焦控件的纯文字卡片（诊断 / 关于）才传 shellFocusable = true，
+ * 否则整块不可聚焦、LazyColumn 永远滚不到它。
  */
 @Composable
-private fun SettingCard(title: String, content: @Composable ColumnScope.() -> Unit) {
+private fun SettingCard(
+    title: String,
+    shellFocusable: Boolean = false,
+    content: @Composable ColumnScope.() -> Unit,
+) {
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(14.dp)
     Box(
@@ -1095,8 +1114,10 @@ private fun SettingCard(title: String, content: @Composable ColumnScope.() -> Un
             .clip(shape)
             .background(if (focused) Color(0xFF17263B) else Color(0xFF101A2B))
             .focusRing(focused, shape)
+            // focusable 紧跟 onFocusChanged，确保高亮状态能被观察到；
+            // 不可聚焦的外壳后面没有 focus node，focused 恒为 false，不高亮也不抢焦点。
+            .then(if (shellFocusable) Modifier.focusable() else Modifier)
             .onFocusChanged { focused = it.isFocused }
-            .focusable()
             .padding(16.dp),
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
