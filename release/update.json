@@ -1,10 +1,10 @@
 {
-  "versionCode": 31,
-  "versionName": "0.5.5",
-  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.5/iptv-player-0.5.5.apk",
+  "versionCode": 32,
+  "versionName": "0.5.6",
+  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.6/iptv-player-0.5.6.apk",
   "apkFallback": [
-    "https://github.com/lzp1314/meiying-tv/releases/download/v0.5.5/iptv-player-0.5.5.apk"
+    "https://github.com/lzp1314/meiying-tv/releases/download/v0.5.6/iptv-player-0.5.6.apk"
   ],
-  "sha256": "55d47d6af320c7f5f9545fa13c763cf18555d41da3adf543d039d90a2aef5154",
-  "notes": "1) 侧栏导航按到哪就切到哪页，不用再按确认键：上下键改在焦点系统捕获阶段直接切页并搬焦点，分类栏/频道行的双焦点节点合并。\n2) 切分组从该组第一个台开始：切分类、换源都会把列表滚回第一行；呼出侧栏仍定位到正在播的台。\n3) 首次进列表不再那么卡：侧栏快照只在源变化时读取（原来每次切页都重读几 MB JSON）；台标请求最多 3 个并发、失败 5 分钟内不重发；设置→诊断新增启动耗时打点（启动→首帧 / 读缓存 / 拉源 / 引擎）。\n4) 设置页拆成播放、信号源、在线更新、诊断、关于五张独立卡片，纯文字的诊断和关于也能用遥控器滚到。"
+  "sha256": "3b987246788b122a548c642baa6f5229383c6f05333a380a144fb7e82e721db9",
+  "notes": "1) 换台 OSD 新增分辨率一行（ExoPlayer 与 VLC 统一上报，随 OSD 闪 3 秒）：H.264 1920×1080 · AAC · ExoPlayer，切到 VLC 也照样显示。\\n2) 播放界面底部新增当前节目进度条：用 EPG 的节目起止时间算进度，每秒推进，显示「18:30–19:30 已播 25 分 · 剩 35 分」；没有 EPG 的源显示「无节目单」，不留空条。\\n注：直播无传统时间轴，这条只表示当前这一档节目播了多少、还剩多久。"
 }
