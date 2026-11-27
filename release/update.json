@@ -1,10 +1,10 @@
 {
-  "versionCode": 32,
-  "versionName": "0.5.6",
-  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.6/iptv-player-0.5.6.apk",
+  "versionCode": 33,
+  "versionName": "0.5.7",
+  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.5.7/iptv-player-0.5.7.apk",
   "apkFallback": [
-    "https://github.com/lzp1314/meiying-tv/releases/download/v0.5.6/iptv-player-0.5.6.apk"
+    "https://github.com/lzp1314/meiying-tv/releases/download/v0.5.7/iptv-player-0.5.7.apk"
   ],
-  "sha256": "3b987246788b122a548c642baa6f5229383c6f05333a380a144fb7e82e721db9",
-  "notes": "1) 换台 OSD 新增分辨率一行（ExoPlayer 与 VLC 统一上报，随 OSD 闪 3 秒）：H.264 1920×1080 · AAC · ExoPlayer，切到 VLC 也照样显示。\\n2) 播放界面底部新增当前节目进度条：用 EPG 的节目起止时间算进度，每秒推进，显示「18:30–19:30 已播 25 分 · 剩 35 分」；没有 EPG 的源显示「无节目单」，不留空条。\\n注：直播无传统时间轴，这条只表示当前这一档节目播了多少、还剩多久。"
+  "sha256": "237c9321bd54903dea6d0b864d98e45fe30dfcf7ef93d59fc7a96ce703dd2d9c",
+  "notes": "1) 底部节目进度条改为跟随换台 OSD：换台时出现，3 秒后和 OSD 卡片一起隐藏，平时画面干净。\\n2) 侧边导航「信号源」三个字一排显示：收紧图标与留白占用、强制单行，不再换行。\\n3) 设置里的按钮改成「刷新全部信号源」：点一次串行刷新所有已添加的源（一条刷完再下一条，避免老盒子被并发拖垮），不切源、不打断正在看的台，过程中提示进度。\\n4) 每个源行新增独立「刷新」入口（绿色，在编辑前面）：只刷这一条源、不切源不打断播放；遥控器左右键在源名→刷新→编辑→锁定之间移动。"
 }
