@@ -1,0 +1,132 @@
+name: Publish GitHub Release
+
+# 免 PAT 发版：不需要任何个人访问令牌。
+# 触发方式二选一：
+#   1) push 一个 v* 标签（本地 git push github v0.6.1 即可）
+#   2) 在 Actions 页面点 Run workflow，填版本号
+# APK 从 Gitee Release 下载，签名/内容与本地构建一致，用 update.json 的 sha256 校验。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（不带 v），例如 0.6.1'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 解析版本号
+        id: ver
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.version }}" ]; then
+            V="${{ inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#v}"
+          fi
+          # 去掉可能带上的前导 v
+          V="${V#v}"
+          if [ -z "$V" ]; then
+            echo "::error::无法解析版本号"
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "APK 版本: $V"
+
+      - name: 从 Gitee 下载 APK
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          URL="https://gitee.com/lzp-zl/meiying-tv/releases/download/v${V}/iptv-player-${V}.apk"
+          echo "下载地址: $URL"
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 20 --max-time 900 \
+            -o "iptv-player-${V}.apk" "$URL"
+          ls -l "iptv-player-${V}.apk"
+
+      - name: 用 update.json 校验 sha256
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          python3 - "$V" <<'PY'
+          import json, sys, hashlib, pathlib
+
+          version = sys.argv[1]
+          manifest = json.load(open('release/update.json'))
+          apk = pathlib.Path(f'iptv-player-{version}.apk')
+
+          print(f"清单版本: {manifest['versionName']} (vc{manifest['versionCode']})")
+          if manifest['versionName'] != version:
+              raise SystemExit(f"清单版本 {manifest['versionName']} 与待发布 {version} 不一致，中止")
+
+          expect = (manifest.get('sha256') or '').lower()
+          if not expect:
+              raise SystemExit("清单里没有 sha256，中止")
+
+          h = hashlib.sha256()
+          with apk.open('rb') as f:
+              for chunk in iter(lambda: f.read(1 << 20), b''):
+                  h.update(chunk)
+          actual = h.hexdigest()
+
+          print(f"期望 sha256: {expect}")
+          print(f"实际 sha256: {actual}")
+          if expect != actual:
+              raise SystemExit("sha256 不一致，中止发布")
+
+          print(f"大小: {apk.stat().st_size} 字节")
+          print("✅ 校验通过")
+          PY
+
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          TAG="v${V}"
+          APK="iptv-player-${V}.apk"
+
+          # notes 里的 \n 是字面转义，转成真实换行再交给 gh
+          python3 - > /tmp/notes.md <<'PY'
+          import json
+          d = json.load(open('release/update.json'))
+          print((d.get('notes') or '').replace('\\n', '\n'))
+          PY
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，覆盖上传资产"
+            gh release upload "$TAG" "$APK" --clobber
+          else
+            echo "创建 Release $TAG"
+            gh release create "$TAG" "$APK" \
+              --title "魅影TV ${TAG}" \
+              --notes-file /tmp/notes.md \
+              --target "$GITHUB_SHA"
+          fi
+
+      - name: 输出结果
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          echo "=== Release v${V} ==="
+          gh release view "v${V}" --json tagName,name,url,assets \
+            --template 'tag: {{.tagName}}{{"\n"}}name: {{.name}}{{"\n"}}url: {{.url}}{{"\n"}}assets:{{range .assets}}{{"\n"}}  - {{.name}} ({{.size}} B){{end}}{{"\n"}}'
