@@ -409,13 +409,20 @@ fun PlayerScreen(
 
     val deviceLabel = if (isTv) "电视" else "手机"
 
-    // 手机扫码推送过来的源：先进「待保存」，用户确认才落盘
+    // 手机扫码推送过来的源：直接落盘，不再要求回电视端按一次「保存」。
+    // 只有地址不合法时才退回「待确认」，让人能在电视上手动改。
     val pairing = remember {
         PairingServer(deviceLabel) { url, name, epg ->
             scope.launch {
-                pending.add(DraftSource(name, url, epg))
-                message = "已收到「$name」，确认后点保存"
-                toast = "收到新源：$name"
+                val added = runCatching { repo.add(name, url, epg) }.getOrNull()
+                if (added == null) {
+                    pending.add(DraftSource(name, url, epg))
+                    message = "手机提交的「$name」地址不合法，已放到待确认"
+                    toast = "地址不合法：$name"
+                } else {
+                    message = "已从手机同步「${added.name}」"
+                    toast = "已添加：${added.name}"
+                }
             }
             true
         }

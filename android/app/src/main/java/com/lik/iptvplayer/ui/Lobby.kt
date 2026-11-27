@@ -38,6 +38,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -149,7 +150,14 @@ internal fun LobbyPanel(
     // 用户往下按到信号源，焦点停在那，页面必然跟着切。
     LaunchedEffect(isTv, navFocusTrigger) {
         if (!isTv) return@LaunchedEffect
-        runCatching { navFocus[tab.ordinal].requestFocus() }
+        // 等一帧再请求焦点。LaunchedEffect 在组合阶段就跑，此时 NavItem 还没完成布局、
+        // 没附着到焦点树，requestFocus 直接抛异常被 runCatching 吞掉——焦点从头到尾
+        // 没落到导航项上，于是「按到信号源/设置却还要按 OK」。这是 0.6.x 反复失灵的根因。
+        withFrameNanos { }
+        repeat(3) {
+            if (runCatching { navFocus[tab.ordinal].requestFocus() }.isSuccess) return@LaunchedEffect
+            delay(40)
+        }
     }
 
     // 参考图的形态是「侧边浮层」，不是独占全屏：
@@ -240,7 +248,23 @@ private fun NavRail(
     Column(
         Modifier.fillMaxHeight()
             .width(if (isTv) 150.dp else 116.dp)
-            .padding(top = if (isTv) 34.dp else 20.dp, bottom = if (isTv) 28.dp else 16.dp),
+            .padding(top = if (isTv) 34.dp else 20.dp, bottom = if (isTv) 28.dp else 16.dp)
+            // 兜底：只要焦点还在这条侧栏的子树里，上下键就在这里直接切页。
+            // 不依赖 NavItem 自己的 onPreviewKeyEvent 有没有收到——真机焦点链一错位，
+            // 子节点就哑火，父节点这层是最后一道保险（preview 从根往叶子走，父级先拿到）。
+            .onPreviewKeyEvent { e ->
+                if (!isTv || e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                val delta = when (e.key) {
+                    Key.DirectionUp -> -1
+                    Key.DirectionDown -> 1
+                    else -> return@onPreviewKeyEvent false
+                }
+                val size = LobbyTab.entries.size
+                val n = ((current.ordinal + delta) % size + size) % size
+                onTab(LobbyTab.entries[n])
+                runCatching { focusRequests[n].requestFocus() }
+                true
+            },
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
@@ -827,6 +851,8 @@ private fun AddSourceQrBlock(
 ) {
     val qr = remember(pairInfo?.url) { pairInfo?.let { QrEncoder.bitmap(it.url, 420) } }
     var formOpen by remember { mutableStateOf(false) }
+    // 二维码默认不展开，按确认才出
+    var qrOpen by remember { mutableStateOf(false) }
     var formName by remember { mutableStateOf("") }
     var formUrl by remember { mutableStateOf("") }
     var formEpg by remember { mutableStateOf("") }
@@ -885,25 +911,31 @@ private fun AddSourceQrBlock(
                 }
             }
         }
-        Text("扫码添加", color = TextDim, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
-        if (qr != null && pairInfo != null) {
-            // 侧栏比全屏窄，二维码与说明上下排才不会横向溢出
-            Image(
-                bitmap = qr.asImageBitmap(),
-                contentDescription = "添加源二维码",
-                modifier = Modifier.size(150.dp).background(Color.White).padding(6.dp),
-            )
-            Text("配对码 ${pairInfo.code}", color = Color.White, fontSize = 18.sp)
-            Text(
-                "手机连同一个 WiFi，用相机扫码填订阅地址；确定后先出现在「待保存」，再点保存。",
-                color = TextDim, fontSize = 12.sp,
-                modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
-            )
-        } else {
-            Text("正在准备二维码…", color = TextDim, fontSize = 13.sp)
+        // 二维码默认收起：电视上整块摊开太占地方，按确认才展开
+        TextButton(onClick = { qrOpen = !qrOpen }) {
+            Text(if (qrOpen) "收起扫码添加" else "扫码添加源", fontSize = if (isTv) 14.sp else 13.sp)
         }
+        if (qrOpen) {
+            if (qr != null && pairInfo != null) {
+                // 侧栏比全屏窄，二维码与说明上下排才不会横向溢出
+                Image(
+                    bitmap = qr.asImageBitmap(),
+                    contentDescription = "添加源二维码",
+                    modifier = Modifier.size(150.dp).background(Color.White).padding(6.dp),
+                )
+                Text("配对码 ${pairInfo.code}", color = Color.White, fontSize = 18.sp)
+                Text(
+                    "手机连同一个 WiFi，用相机扫码填订阅地址。保存后自动同步到电视，这里不用再确认。",
+                    color = TextDim, fontSize = 12.sp,
+                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                )
+            } else {
+                Text("正在准备二维码…", color = TextDim, fontSize = 13.sp)
+            }
+        }
+        // 只有自动保存失败（例如地址不是 http/https）才会留在这里，变成「待确认」
         if (pending.isNotEmpty()) {
-            Text("待保存（${pending.size}）", color = Accent, fontSize = 14.sp)
+            Text("待确认（${pending.size}）", color = Accent, fontSize = 14.sp)
             pending.forEach { d ->
                 DraftRow(true, d, { onSaveDraft(d) }, { onDropDraft(d) })
             }
