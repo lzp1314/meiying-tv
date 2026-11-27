@@ -1,10 +1,10 @@
 {
-  "versionCode": 37,
-  "versionName": "0.6.1",
-  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.6.1/iptv-player-0.6.1.apk",
+  "versionCode": 38,
+  "versionName": "0.6.2",
+  "apk": "https://gitee.com/lzp-zl/meiying-tv/releases/download/v0.6.2/iptv-player-0.6.2.apk",
   "apkFallback": [
-    "https://github.com/lzp1314/meiying-tv/releases/download/v0.6.1/iptv-player-0.6.1.apk"
+    "https://github.com/lzp1314/meiying-tv/releases/download/v0.6.2/iptv-player-0.6.2.apk"
   ],
-  "sha256": "b368a6db7ddd6a920287cdd9ed1968bd72698e255e2cae2821b21abec7263bcf",
-  "notes": "1) 修复设置页「检查更新」按钮按下后跳回频道界面的问题（按钮禁用导致遥控器焦点丢失，被系统甩给侧栏导航）。\\n2) 同一根因加固：下载并安装、以后再说两个按钮不再让焦点无处可落。"
+  "sha256": "d061bcb1f357fc6c5a6d9e5ed75110b127c79ce50854f45229bb80f5fe144e75",
+  "notes": "1) 修复一级导航「按到信号源/设置还要按确认」：焦点请求改到布局完成后执行，并给侧栏加按键兜底。\\n2) 扫码添加源收成一行文字，按遥控器确认才展开二维码。\\n3) 手机扫码填好并保存后直接同步到电视生效，不用再回电视端按保存。"
 }
